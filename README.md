@@ -22,10 +22,13 @@ PC im Heimnetz ────> http://SERVER:8095  (Weboberfläche)
   wird abgeschaltet, zeigt das Radio nur noch die eigenen Menüs. Das Radio bleibt in jedem Fall nutzbar.
 - **Favoriten:** Im Hauptmenü des Radios steht ganz oben *Favoriten*. Gepflegt werden sie am PC in
   der Weboberfläche (Reihenfolge, Suche bei radio-browser.info, Sender per Adresse mit Prüfung).
-- **FAV-Liste und Stationstasten überleben Airable:** Die FAV-Taste (bei anderen Modellen auch die
-  Stationstasten) speichert im Radio nur Airable-IDs. Für jede erfasste ID wählt man einen
-  Ersatz-Sender; das Portal beantwortet den Eintrag dann selbst. Neue FAV-Einträge, die man am
-  Radio aus unseren Menüs anlegt, tragen schon unsere IDs.
+- **FAV-Taste über die Weboberfläche steuern:** Die FAV-Liste liegt im Radio (ID und Beschriftung,
+  von außen nicht änderbar; das Radio schlägt nur die ID beim Abspielen nach). Deshalb gibt es unter
+  *Favoriten → Favorit-Plaetze* feste Einträge „Favorit 1“ bis „Favorit 10“: einmal anspielen und mit
+  FAV halten speichern. Danach spielt „Favorit k“ immer den k-ten Favoriten der Weboberfläche
+  (beim IWR 294 bestätigt; das Display zeigt dabei „Favorit k“).
+- **Alte FAV-Einträge überleben Airable:** Für jede erfasste Airable-ID wählt man einen Ersatz-Sender
+  oder einen Platz („Favorit k“); das Portal beantwortet den Eintrag dann selbst.
 - **Eigene Podcasts** (RSS, Suche über iTunes): Menü *Eigene Podcasts* am Radio, ungehörte Folgen
   mit `*`. Podcast-Server leiten oft mehrfach weiter und nutzen https: das löst der Server auf und
   reicht die Folge bei Bedarf als http durch, denn das Radio folgt höchstens einer Weiterleitung und
@@ -74,6 +77,7 @@ Dem Radio im Router eine feste IP geben.
 | `TESTMENUE` | `ja`: Eintrag *Test* unten im Hauptmenü |
 | `UMLAUTE` | `umschreiben` (ae/oe/ue/ss, wie Airable; Vorgabe) oder `utf8` (Umlaute, ß, é bleiben; Typografie wie „ “ – wird ersetzt, Emoji und fremde Schriften fallen weg). Beim IWR 294 funktioniert `utf8` |
 | `PORTAL_URL` | Adresse der Oberfläche, wie sie am Radio angezeigt wird |
+| `AIRABLE_AUSBLENDEN` | Airable-Menüs, die im Hauptmenü fehlen sollen, als Teile ihrer Adresse: `collection=stations` (Meine Favoriten), `country=` (Örtlich), `collection=streams` (Meine gespeicherten Sender), `help` (Hilfe), `stations`, `podcasts` |
 
 Daten liegen in `/var/lib/radio-portal`: `sender.json`, `favoriten.json`, `airable.json` (erfasste
 Tasten-IDs und Ersatz), `podcasts.json`, `radio.json`. Eigene IDs (Sender ab 1000001, Podcasts ab

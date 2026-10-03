@@ -269,3 +269,16 @@ class PlatzTests(Base):
         self.assertIn("/collection/pop/", st["Bookmark"])
         self.call(f"/vtuner/collection/pop/station={c}")
         self.assertNotIn(c, self.portal.library.favorites())
+
+
+class AusblendenTests(Base):
+    def test_airable_menues_ausblenden(self):
+        self.mk(airable_ausblenden=("help", "country="))
+        menue = (b'<?xml version="1.0"?><ListOfItems><ItemCount>3</ItemCount>'
+                 b'<Item><ItemType>Dir</ItemType><Title>Sender</Title><UrlDir>http://a/vtuner/stations?</UrlDir></Item>'
+                 b'<Item><ItemType>Dir</ItemType><Title>Oertlich</Title><UrlDir>http://a/vtuner/country=de?</UrlDir></Item>'
+                 b'<Item><ItemType>Dir</ItemType><Title>Hilfe</Title><UrlDir>http://a/vtuner/help?</UrlDir></Item>'
+                 b'</ListOfItems>')
+        self.portal.forwarder.body = menue
+        _, it = items(self.call("/vtuner", ""))
+        self.assertEqual([i.get("Title") for i in it], ["Favoriten", "Sender"])

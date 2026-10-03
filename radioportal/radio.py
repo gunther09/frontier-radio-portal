@@ -169,6 +169,8 @@ def hauptmenue(portal, host: str, target: str, headers) -> Reply:
     if portal.podcasts.all():
         items.append(x.dir("Eigene Podcasts", f"http://{host}/portal/podcasts?"))
     for title, url in airable_menue(portal, host, target, headers):
+        if any(teil in urllib.parse.urlsplit(url).path for teil in portal.cfg.airable_ausblenden):
+            continue
         items.append(x.dir("Airable-Favoriten" if title == "Meine Favoriten" else title, url))
     if portal.cfg.testmenue:
         items.append(x.dir("Test", f"http://{host}/portal/test?"))

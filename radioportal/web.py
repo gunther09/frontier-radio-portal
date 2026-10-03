@@ -148,14 +148,15 @@ def seite_favoriten(portal, qs) -> Result:
             f'<td class="r">{knopf("/favorit/hoch", "↑", id=sid)} {knopf("/favorit/runter", "↓", id=sid)} '
             f'{knopf("/favorit/weg", "✕", id=sid)}</td></tr>')
     if zeilen:
-        tab = ("<table><tr><th>#<th>Sender<th class=hide-m>Land<th>Format<th>Radio<th></tr>"
+        tab = ("<table><tr><th>Platz<th>Sender<th class=hide-m>Land<th>Format<th>Radio<th></tr>"
                + "".join(zeilen) + "</table>")
     else:
         tab = ('<div class="leer">Noch keine Favoriten. <a href="/suche">Sender suchen</a> oder '
                '<a href="/neu">per Adresse hinzufügen</a>.</div>')
     n_air = len(portal.store.snapshot())
     info = (f'<p class="mute">Am Radio unter <b>Internet Radio → Favoriten</b> (ganz oben im Menü). '
-            f'Reihenfolge wie hier. {n_air} Airable-Sender vom Radio erfasst: '
+            f'Reihenfolge wie hier. Der FAV-Eintrag „Favorit 3“ spielt immer Platz 3 '
+            f'(Plätze 1–{radio.PLAETZE}, einmal am Radio unter <i>Favoriten → Favorit-Plaetze</i> mit FAV halten speichern). {n_air} Airable-Sender vom Radio erfasst: '
             f'<a href="/tasten">FAV-Liste</a>.</p>')
     return page("Favoriten", radio_status(portal) + info + tab, "/", qs.get("m", [""])[0])
 

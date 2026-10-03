@@ -28,6 +28,8 @@ class Config:
     radio_ips: tuple = ()
     # Adresse der Oberflaeche, wie sie am Radio angezeigt wird (z. B. http://server:8095)
     portal_url: str = ""
+    # Airable-Menues, die im Hauptmenue fehlen sollen: Teile ihrer Adresse (z. B. "help country=de")
+    airable_ausblenden: tuple = ()
 
 
 def load(env=None) -> Config:
@@ -43,4 +45,5 @@ def load(env=None) -> Config:
         testmenue=_ja(env.get("TESTMENUE", "nein")),
         radio_ips=tuple(env.get("RADIO_IPS", "").replace(",", " ").split()),
         portal_url=env.get("PORTAL_URL", "").strip(),
+        airable_ausblenden=tuple(env.get("AIRABLE_AUSBLENDEN", "").replace(",", " ").split()),
     )
