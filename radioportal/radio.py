@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import http.client
 import logging
+import re
 import time
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -20,6 +21,8 @@ log = logging.getLogger(__name__)
 TOKEN = b"<EncryptedToken>3a3f5ac48a1dab4e</EncryptedToken>"
 HTML = "text/html; charset=UTF-8"
 PLAY_CACHE_SECONDS = 30
+PLATZ_ERSTE = 3000001  # "Favorit 1" ... "Favorit N": Platz k spielt immer den k-ten Favoriten der Weboberflaeche
+PLAETZE = 10
 AIRABLE_PAUSE = 300  # nach einem Ausfall fragen wir Airable 5 Minuten nicht mehr (kein 4-s-Warten je Menue)
 
 
@@ -39,14 +42,28 @@ def _range(qs: dict) -> tuple[int, int]:
     return num("startItems", 1), num("endItems", 100)
 
 
+def platz_nr(sid: str) -> int:
+    """1..PLAETZE, wenn `sid` eine Platz-ID ist, sonst 0."""
+    if sid.isdigit() and PLATZ_ERSTE <= int(sid) < PLATZ_ERSTE + PLAETZE:
+        return int(sid) - PLATZ_ERSTE + 1
+    return 0
+
+
+def platz_sender(portal, nr: int) -> dict | None:
+    favs = portal.library.favorites()
+    return portal.library.sender(favs[nr - 1]) if 0 < nr <= len(favs) else None
+
+
 def lookup(portal, sid: str) -> dict | None:
-    """Eigener Sender, Sender-Ersatz einer Airable-ID oder Testsender."""
+    """Eigener Sender, Platz (k-ter Favorit), Sender-Ersatz einer Airable-ID oder Testsender."""
     s = portal.library.sender(sid)
     if s:
         return s
+    if platz_nr(sid):
+        return platz_sender(portal, platz_nr(sid))
     ersatz = portal.store.ersatz_of(sid)
     if ersatz:
-        s = portal.library.sender(ersatz)
+        s = lookup(portal, ersatz) if platz_nr(ersatz) else portal.library.sender(ersatz)
         if s:
             return s
     if portal.cfg.testmenue:
@@ -54,9 +71,45 @@ def lookup(portal, sid: str) -> dict | None:
     return None
 
 
-def _station(portal, host: str, shown_id: str, s: dict) -> str:
-    return portal.xml.station(shown_id, s["name"], f"http://{host}/portal/play/{shown_id}",
-                              fmt=s.get("genre", ""), location=s.get("land", ""), bandwidth=s.get("bitrate", ""))
+def _station(portal, host: str, shown_id: str, s: dict, name: str = "", desc: str = "") -> str:
+    """Bookmark: Das Radio ruft ihn, wenn man den Sender dort zu den Favoriten hinzufuegt/entfernt
+    (nur fuer eigene Sender, nicht fuer Plaetze und Ersatz)."""
+    bm = ""
+    if portal.library.sender(shown_id):
+        aktion = "pop" if shown_id in portal.library.favorites() else "push"
+        bm = f"http://{host}/vtuner/collection/{aktion}/station={shown_id}?"
+    return portal.xml.station(shown_id, name or s["name"], f"http://{host}/portal/play/{shown_id}", desc=desc,
+                              fmt=s.get("genre", ""), location=s.get("land", ""), bandwidth=s.get("bitrate", ""),
+                              bookmark=bm)
+
+
+def plaetze(portal, host: str) -> Reply:
+    """Feste Eintraege "Favorit 1..N" zum Speichern in der FAV-Liste des Radios. Die Beschriftung
+    bleibt immer gleich, was spielt, bestimmt die Weboberflaeche (Reihenfolge der Favoriten)."""
+    x = portal.xml
+    items = []
+    for nr in range(1, PLAETZE + 1):
+        sid = str(PLATZ_ERSTE + nr - 1)
+        s = platz_sender(portal, nr)
+        desc = ("Spielt jetzt: " + s["name"]) if s else "Noch leer (Favoriten im Browser pflegen)"
+        items.append(x.station(sid, f"Favorit {nr}", f"http://{host}/portal/play/{sid}", desc=desc))
+    return Reply(200, HTML, x.listing(items, previous=f"http://{host}/portal/favoriten?"))
+
+
+def collection_aendern(portal, host: str, aktion: str, sid: str) -> Reply:
+    """`/vtuner/collection/push|pop/station=ID`: Favorit am Radio hinzufuegen/entfernen."""
+    lib = portal.library
+    if not lib.sender(sid):
+        ers = portal.store.ersatz_of(sid)
+        sid = ers if ers and lib.sender(ers) else sid
+    if aktion == "push":
+        lib.fav_add(sid)
+        text = "Zu den Favoriten hinzugefuegt"
+    else:
+        lib.fav_remove(sid)
+        text = "Aus den Favoriten entfernt"
+    log.info("Radio: %s station=%s", aktion, sid)
+    return Reply(200, HTML, portal.xml.listing([portal.xml.display(text)], previous=f"http://{host}/vtuner?"))
 
 
 def play_target(portal, host: str, s: dict) -> str:
@@ -130,6 +183,8 @@ def favoriten(portal, host: str, qs: dict) -> Reply:
         if s:
             entries.append(_station(portal, host, sid, s))
     start, end = _range(qs)
+    if entries:
+        entries.append(x.dir("Favorit-Plaetze (FAV-Taste)", f"http://{host}/portal/plaetze?"))
     if not entries:
         shown = [x.display("Noch keine Favoriten")]
         if portal.cfg.portal_url:
@@ -254,6 +309,11 @@ def handle(portal, host: str, command: str, path: str, query: str, headers) -> R
         # Klartext ohne Zeilenende, wie Airable
         return Reply(200, "audio/x-mpegurl", play_target(portal, host, s).encode("utf-8"))
 
+    m = re.match(r"^/vtuner/collection/(push|pop)/station=(\d+)/?$", path)
+    if m:
+        return collection_aendern(portal, host, m.group(1), m.group(2))
+    if path == "/portal/plaetze":
+        return plaetze(portal, host)
     if path == "/portal/favoriten":
         return favoriten(portal, host, qs)
     if path == "/portal/podcasts":

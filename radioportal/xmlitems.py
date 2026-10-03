@@ -55,13 +55,14 @@ class Xml:
         return f"<Item><ItemType>Display</ItemType><Display>{self.t(text)}</Display></Item>"
 
     def station(self, sid: str, name: str, url: str, desc: str = "", fmt: str = "", location: str = "",
-                bandwidth="", mime: str = "MP3") -> str:
+                bandwidth="", mime: str = "MP3", bookmark: str = "") -> str:
+        marke = f"<Bookmark>{escape(bookmark)}</Bookmark>" if bookmark else ""
         return (f"<Item><ItemType>Station</ItemType><StationId>{escape(str(sid))}</StationId>"
                 f"<StationName>{self.t(name)}</StationName><StationUrl>{escape(url)}</StationUrl>"
                 f"<StationDesc>{self.t(desc)}</StationDesc><StationFormat>{self.t(fmt)}</StationFormat>"
                 f"<StationLocation>{self.t(location)}</StationLocation>"
                 f"<StationBandWidth>{escape(str(bandwidth or ''))}</StationBandWidth>"
-                f"<StationMime>{escape(mime)}</StationMime><Relia>5</Relia></Item>")
+                f"<StationMime>{escape(mime)}</StationMime><Relia>5</Relia>{marke}</Item>")
 
     def show(self, sid: str, name: str, url: str) -> str:
         """Ein Podcast (das Radio ruft `url` unveraendert auf)."""

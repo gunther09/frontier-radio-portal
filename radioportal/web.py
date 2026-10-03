@@ -11,6 +11,7 @@ import urllib.parse
 
 from . import __version__
 from . import probe as probe_mod
+from . import radio
 from . import podcasts as pod
 from .radiobrowser import RadioBrowserError
 
@@ -237,14 +238,18 @@ def seite_sender(portal, qs) -> Result:
 def seite_tasten(portal, qs) -> Result:
     lib = portal.library
     eigene = sorted(lib.all_senders().values(), key=lambda s: s["name"].lower())
-    opts = "".join(f'<option value="{esc(s["id"])}">{esc(s["name"])}</option>' for s in eigene)
+    opts = "".join(f'<option value="{radio.PLATZ_ERSTE + n - 1}">Favorit {n} (jeweils der {n}. Favorit)</option>'
+                   for n in range(1, radio.PLAETZE + 1))
+    opts += "".join(f'<option value="{esc(s["id"])}">{esc(s["name"])}</option>' for s in eigene)
     zeilen = []
     air = portal.store.snapshot()
     for aid, e in sorted(air.items(), key=lambda kv: kv[1].get("zuletzt", ""), reverse=True):
         eid = e.get("ersatz_id", "")
-        es = lib.sender(eid) if eid else None
-        if es:
-            ers = (f'<span class="ok">→ {esc(es["name"])}</span> '
+        nr = radio.platz_nr(eid) if eid else 0
+        es = radio.lookup(portal, aid) if eid else None
+        if nr or es:
+            ziel = (f"Favorit {nr}" + (f" (jetzt: {es['name']})" if es else " (noch leer)")) if nr else es["name"]
+            ers = (f'<span class="ok">→ {esc(ziel)}</span> '
                    + knopf("/tasten/ersatz", "Entfernen", aid=aid, sid=""))
         else:
             ers = (f'<form method="post" action="/tasten/ersatz"><input type="hidden" name="aid" value="{esc(aid)}">'
@@ -262,7 +267,17 @@ def seite_tasten(portal, qs) -> Result:
             'Neue Einträge in der FAV-Liste, die du am Radio selbst anlegst, tragen unsere IDs und brauchen keinen Ersatz.</p>')
     tab = ("<table><tr><th>Airable-Sender am Radio<th class=hide-m>Gespielt · zuletzt<th>Ersatz-Sender</tr>"
            + "".join(zeilen) + "</table>") if zeilen else '<div class="leer">Noch nichts erfasst.</div>'
-    return page("FAV-Liste des Radios", erkl + tab, "/tasten", qs.get("m", [""])[0])
+    plaetze = "".join(
+        f"<tr><td>Favorit {n}<td>" + (esc(radio.platz_sender(portal, n)["name"]) if radio.platz_sender(portal, n) else
+                                      '<span class="mute">noch leer</span>') + "</tr>"
+        for n in range(1, radio.PLAETZE + 1))
+    ohne = [a for a, e in air.items() if not e.get("ersatz_id")]
+    reihe = (knopf("/tasten/reihe", "Alle Einträge ohne Ersatz der Reihe nach auf Favorit 1, 2, 3 … legen", "pri")
+             if ohne else "")
+    unten = ("<h2>Favorit-Plätze</h2><p class=\"mute\">Am Radio unter <i>Internetradio → Favoriten → Favorit-Plätze</i>: "
+             "den Platz anspielen und FAV halten. Die FAV-Liste zeigt dann immer „Favorit k“, gespielt wird der "
+             "k-te Favorit von hier.</p><table><tr><th>Platz<th>spielt jetzt</tr>" + plaetze + "</table>")
+    return page("FAV-Liste des Radios", erkl + reihe + tab + unten, "/tasten", qs.get("m", [""])[0])
 
 
 def seite_vorschlag(portal, qs) -> Result:
@@ -405,10 +420,17 @@ def aktion(portal, path: str, form: dict) -> Result:
         return redirect("/sender", f"„{s['name']}“ entfernt." if ok else "Nicht entfernt (Favorit oder Taste).")
     if path == "/tasten/ersatz":
         aid, sid = f("aid"), f("sid")
-        if sid and not lib.sender(sid):
+        if sid and not lib.sender(sid) and not radio.platz_nr(sid):
             return redirect("/tasten", "Unbekannter Sender.")
         ok = portal.store.set_ersatz(aid, sid or None)
         return redirect("/tasten", ("Ersatz gesetzt." if sid else "Ersatz entfernt.") if ok else "Unbekannte ID.")
+    if path == "/tasten/reihe":
+        n = 0
+        for aid, e in sorted(portal.store.snapshot().items(), key=lambda kv: kv[1].get("name", "").lower()):
+            if not e.get("ersatz_id") and n < radio.PLAETZE:
+                portal.store.set_ersatz(aid, str(radio.PLATZ_ERSTE + n))
+                n += 1
+        return redirect("/tasten", f"{n} Einträge auf Favorit 1 bis {n} gelegt.")
     if path == "/tasten/uebernehmen":
         aid = f("aid")
         if aid not in portal.store.snapshot():

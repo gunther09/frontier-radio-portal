@@ -147,11 +147,12 @@ class MenueTests(Base):
         for i in range(130):
             lib.fav_add(lib.add_sender(name=f"Sender {i}", url=f"http://x/{i}"))
         n, it = items(self.call("/portal/favoriten", "startItems=1&endItems=100"))
-        self.assertEqual(n, 130)
+        self.assertEqual(n, 131)  # 130 Sender + Ordner "Favorit-Plaetze"
         self.assertEqual(len(it), 101)  # 100 Sender + Previous
         n, it = items(self.call("/portal/favoriten", "startItems=101&endItems=200"))
-        self.assertEqual(len(it), 31)
+        self.assertEqual(len(it), 32)
         self.assertEqual(it[1]["StationName"], "Sender 100")
+        self.assertEqual(it[-1]["ItemType"], "Dir")
 
 
 class LookupPlayTests(Base):
@@ -218,3 +219,53 @@ class LookupPlayTests(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PlatzTests(Base):
+    """FAV-Taste: Plaetze "Favorit k" spielen immer den k-ten Favoriten der Weboberflaeche."""
+
+    def setUp(self):
+        super().setUp()
+        lib = self.portal.library
+        self.a = lib.add_sender(name="Alpha", url="http://a.example/live")
+        self.b = lib.add_sender(name="Beta", url="http://b.example/live")
+        lib.fav_add(self.a)
+        lib.fav_add(self.b)
+
+    def search(self, sid):
+        return self.call("/setupapp/aldi/asp/BrowseXML/Search.asp", f"sSearchtype=3&Search={sid}&mac=h")
+
+    def test_menue_hat_feste_namen_und_zeigt_inhalt_in_beschreibung(self):
+        n, it = items(self.call("/portal/plaetze"))
+        st = [i for i in it if i["ItemType"] == "Station"]
+        self.assertEqual([s["StationName"] for s in st][:3], ["Favorit 1", "Favorit 2", "Favorit 3"])
+        self.assertEqual(st[0]["StationId"], "3000001")
+        self.assertIn("Alpha", st[0]["StationDesc"])
+        self.assertIn("leer", st[2]["StationDesc"])
+
+    def test_platz_spielt_kten_favoriten_und_folgt_der_reihenfolge(self):
+        self.assertEqual(items(self.search("3000001"))[1][1]["StationName"], "Alpha")
+        self.portal.library.fav_move(self.b, -1)
+        self.assertEqual(items(self.search("3000001"))[1][1]["StationName"], "Beta")
+        self.assertEqual(items(self.search("3000002"))[1][1]["StationName"], "Alpha")
+        self.assertIsNone(self.search("3000003"))  # leer: an Airable durchgereicht, die kennt es nicht
+
+    def test_alte_id_mit_platz_als_ersatz(self):
+        aid = "1234567890123456"
+        self.portal.store.note_seen(aid, name="Alt")
+        self.portal.store.set_ersatz(aid, "3000002")
+        self.assertEqual(items(self.search(aid))[1][1]["StationName"], "Beta")
+        self.portal.library.fav_remove(self.b)
+        self.assertIsNone(self.search(aid))
+
+    def test_bookmark_und_push_pop(self):
+        c = self.portal.library.add_sender(name="Gamma", url="http://c.example/live")
+        st = items(self.search(c))[1][1]
+        self.assertTrue(st["Bookmark"].endswith(f"/vtuner/collection/push/station={c}?"))
+        r = self.call(f"/vtuner/collection/push/station={c}")
+        self.assertEqual(r.status, 200)
+        self.assertIn(c, self.portal.library.favorites())
+        st = items(self.search(c))[1][1]
+        self.assertIn("/collection/pop/", st["Bookmark"])
+        self.call(f"/vtuner/collection/pop/station={c}")
+        self.assertNotIn(c, self.portal.library.favorites())
