@@ -84,6 +84,9 @@ class XmlTests(unittest.TestCase):
     def test_umlaute(self):
         self.assertEqual(xmlitems.umlaute("Äpfel Öl Übung ß é"), "Aepfel Oel Uebung ss e")
         self.assertEqual(xmlitems.umlaute("Äpfel", "utf8"), "Äpfel")
+        # utf8-Modus: Latin-1 bleibt, Typografie wird ersetzt, Unbekanntes faellt weg oder auf ASCII
+        self.assertEqual(xmlitems.umlaute("Süd – „Zitat“ … Straße é", "utf8"), 'Süd - "Zitat" ... Straße é')
+        self.assertEqual(xmlitems.umlaute("Łódź 😀 Привет", "utf8"), "ódz  ")
 
     def test_escaping_und_zaehlung(self):
         x = xmlitems.Xml()

@@ -65,7 +65,7 @@ class AirableStore:
 
     def note_seen(self, station_id: str, name: str = "", format: str = "", ort: str = "",
                   bitrate: str = "") -> None:
-        """Das Radio hat die ID nachgeschlagen (Stationstaste, FAV, letzter Sender)."""
+        """Das Radio hat die ID nachgeschlagen (FAV-Liste, Stationstaste, letzter Sender)."""
         with self._lock:
             e = self._eintrag(station_id)
             for key, wert in (("name", name), ("format", format), ("ort", ort), ("bitrate", bitrate)):

@@ -170,7 +170,7 @@ class Collector:
     """Merkt sich die IDs, die das Radio nachschlaegt (`Search.asp`) und abspielt (`play`).
 
     Sender, die nur in Listen auftauchen, werden nicht erfasst: Nur was das Radio selbst
-    nachschlaegt, kann auf einer Stationstaste liegen."""
+    nachschlaegt, kann in der FAV-Liste (oder auf einer Stationstaste) liegen."""
 
     def __init__(self, store: AirableStore):
         self.store = store

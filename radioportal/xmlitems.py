@@ -14,13 +14,26 @@ _UMLAUTE = str.maketrans({"ä": "ae", "ö": "oe", "ü": "ue", "Ä": "Ae", "Ö": 
 _CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
 
+_TYPOGRAFIE = str.maketrans({"\u201c": '"', "\u201d": '"', "\u201e": '"', "\u2018": "'", "\u2019": "'", "\u201a": "'",
+                             "\u2013": "-", "\u2014": "-", "\u2026": "...", "\u00a0": " ", "\u2022": "*"})
+
+
+def _ascii(ch: str) -> str:
+    return unicodedata.normalize("NFKD", ch).encode("ascii", "ignore").decode("ascii")
+
+
 def umlaute(text: str, mode: str = "umschreiben") -> str:
     """`umschreiben`: ae/oe/ue/ss, Rest per NFKD auf ASCII (wie Airable fuer dieses Radio).
-    `utf8`: unveraendert."""
+    `utf8`: Zeichen bis U+00FF bleiben (Umlaute, ss, e-akut: das Display des IWR 294 zeigt sie),
+    typografische Zeichen werden ersetzt, alles andere (Emoji, kyrillisch, ...) faellt auf ASCII
+    zurueck oder weg, weil nicht bekannt ist, was das Display damit macht."""
     text = _CTRL.sub("", str(text))
-    if mode == "utf8":
-        return text
-    return unicodedata.normalize("NFKD", text.translate(_UMLAUTE)).encode("ascii", "ignore").decode("ascii")
+    if mode != "utf8":
+        return unicodedata.normalize("NFKD", text.translate(_UMLAUTE)).encode("ascii", "ignore").decode("ascii")
+    out = []
+    for ch in text.translate(_TYPOGRAFIE):
+        out.append(ch if ord(ch) <= 0xFF else _ascii(ch))
+    return "".join(out)
 
 
 class Xml:

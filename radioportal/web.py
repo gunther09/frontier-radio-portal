@@ -51,7 +51,7 @@ border-radius:4px;background:var(--card);color:var(--fg)}
 
 NAV = (("/", "Favoriten"), ("/suche", "Sender suchen"), ("/neu", "Sender per Adresse"),
        ("/podcasts", "Podcasts"),
-       ("/sender", "Alle Sender"), ("/tasten", "Stationstasten"))
+       ("/sender", "Alle Sender"), ("/tasten", "FAV-Liste"))
 
 
 class Result:
@@ -89,7 +89,7 @@ def status_badge(s: dict) -> str:
     codec = (s.get("codec") or "").upper()
     https = (s.get("url") or "").lower().startswith("https://")
     if codec in ("AAC", "HLS", "OGG", "WMA", "PLS", "M3U") and codec != "MP3":
-        return f'<span class="warn" title="{esc(s.get("hinweis", ""))}">{esc(codec)}: spielt evtl. nicht</span>'
+        return f'<span class="warn" title="{esc(s.get("hinweis", ""))}">{esc(codec)}: spielt am Radio nicht</span>'
     if https:
         return '<span class="ok" title="Der Server holt den Strom">über Server</span>'
     return '<span class="ok">direkt</span>'
@@ -155,7 +155,7 @@ def seite_favoriten(portal, qs) -> Result:
     n_air = len(portal.store.snapshot())
     info = (f'<p class="mute">Am Radio unter <b>Internet Radio → Favoriten</b> (ganz oben im Menü). '
             f'Reihenfolge wie hier. {n_air} Airable-Sender vom Radio erfasst: '
-            f'<a href="/tasten">Stationstasten</a>.</p>')
+            f'<a href="/tasten">FAV-Liste</a>.</p>')
     return page("Favoriten", radio_status(portal) + info + tab, "/", qs.get("m", [""])[0])
 
 
@@ -230,7 +230,7 @@ def seite_sender(portal, qs) -> Result:
             f'<td>{fmt_codec(s)}</td><td>{status_badge(s)}</td><td class="r">{" ".join(akt)}</td></tr>')
     tab = ("<table><tr><th>ID<th>Sender<th>Format<th>Radio<th></tr>" + "".join(zeilen) + "</table>"
            if zeilen else '<div class="leer">Noch keine eigenen Sender.</div>')
-    leg = '<p class="mute">★ = Favorit, ⌨ = ersetzt eine Stationstaste. Diese lassen sich nicht entfernen.</p>'
+    leg = '<p class="mute">★ = Favorit, ⌨ = ersetzt einen Eintrag der FAV-Liste. Diese lassen sich nicht entfernen.</p>'
     return page("Alle Sender", leg + tab, "/sender", qs.get("m", [""])[0])
 
 
@@ -256,12 +256,13 @@ def seite_tasten(portal, qs) -> Result:
             f'{esc(str(e.get("bitrate", "")))} kbit/s</div><div class="klein mute">{esc(e.get("airable_url", ""))}</div></td>'
             f'<td class="hide-m klein">{int(e.get("gespielt", 0))}× · {esc(e.get("zuletzt", "")[:16].replace("T", " "))}</td>'
             f'<td>{ers}</td></tr>')
-    erkl = ('<p class="mute">Stationstasten und die FAV-Taste speichern am Radio nur die Airable-ID. Wählst du hier '
+    erkl = ('<p class="mute">Die FAV-Taste des Radios (und bei anderen Modellen die Stationstasten) speichert nur die Airable-ID. Wählst du hier '
             'einen Ersatz-Sender, antwortet dieses Portal selbst auf die Taste, auch wenn Airable abschaltet. '
-            'Erfasst wird, was das Radio nachschlägt oder abspielt: Taste einmal drücken, dann erscheint sie hier.</p>')
+            'Erfasst wird, was das Radio nachschlägt oder abspielt: den Eintrag in der FAV-Liste einmal aufrufen, dann erscheint er hier. '
+            'Neue Einträge in der FAV-Liste, die du am Radio selbst anlegst, tragen unsere IDs und brauchen keinen Ersatz.</p>')
     tab = ("<table><tr><th>Airable-Sender am Radio<th class=hide-m>Gespielt · zuletzt<th>Ersatz-Sender</tr>"
            + "".join(zeilen) + "</table>") if zeilen else '<div class="leer">Noch nichts erfasst.</div>'
-    return page("Stationstasten", erkl + tab, "/tasten", qs.get("m", [""])[0])
+    return page("FAV-Liste des Radios", erkl + tab, "/tasten", qs.get("m", [""])[0])
 
 
 def seite_vorschlag(portal, qs) -> Result:
@@ -465,7 +466,7 @@ GET_SEITEN = {"/": seite_favoriten, "/suche": seite_suche, "/sender": seite_send
 
 
 def sicherung(portal) -> Result:
-    """Alle Daten als eine JSON-Datei zum Herunterladen (Sender, Favoriten, Tasten-Zuordnung, Podcasts)."""
+    """Alle Daten als eine JSON-Datei zum Herunterladen (Sender, Favoriten, FAV-Zuordnung, Podcasts)."""
     import json
     data = {"erstellt": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
             "version": __version__, "sender": portal.library.all_senders(), "favoriten": portal.library.favorites(),

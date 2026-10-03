@@ -1,7 +1,7 @@
 """Eigene Sender und Favoriten (`sender.json`, `favoriten.json`).
 
 Eigene IDs sind Ganzzahlen ab 1000001, aufsteigend und werden nie neu vergeben (die
-Stationstasten des Radios speichern sie). Airable-IDs haben 16 Stellen, es gibt also keine
+FAV-Liste und Stationstasten des Radios speichern sie). Airable-IDs haben 16 Stellen, es gibt also keine
 Ueberschneidung."""
 
 from __future__ import annotations

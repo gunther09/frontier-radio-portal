@@ -22,8 +22,10 @@ PC im Heimnetz ────> http://SERVER:8095  (Weboberfläche)
   wird abgeschaltet, zeigt das Radio nur noch die eigenen Menüs. Das Radio bleibt in jedem Fall nutzbar.
 - **Favoriten:** Im Hauptmenü des Radios steht ganz oben *Favoriten*. Gepflegt werden sie am PC in
   der Weboberfläche (Reihenfolge, Suche bei radio-browser.info, Sender per Adresse mit Prüfung).
-- **Stationstasten überleben Airable:** Die Tasten des Radios speichern nur Airable-IDs. Für jede
-  erfasste ID wählt man einen Ersatz-Sender; das Portal beantwortet die Taste dann selbst.
+- **FAV-Liste und Stationstasten überleben Airable:** Die FAV-Taste (bei anderen Modellen auch die
+  Stationstasten) speichert im Radio nur Airable-IDs. Für jede erfasste ID wählt man einen
+  Ersatz-Sender; das Portal beantwortet den Eintrag dann selbst. Neue FAV-Einträge, die man am
+  Radio aus unseren Menüs anlegt, tragen schon unsere IDs.
 - **Eigene Podcasts** (RSS, Suche über iTunes): Menü *Eigene Podcasts* am Radio, ungehörte Folgen
   mit `*`. Podcast-Server leiten oft mehrfach weiter und nutzen https: das löst der Server auf und
   reicht die Folge bei Bedarf als http durch, denn das Radio folgt höchstens einer Weiterleitung und
@@ -33,7 +35,8 @@ PC im Heimnetz ────> http://SERVER:8095  (Weboberfläche)
   Abspielen auf (Sitzungskennungen in den Adressen verfallen sonst).
 - **Statusanzeige:** Die Startseite zeigt, wann sich das Radio zuletzt gemeldet hat. Fragt es
   statt des Servers den Router, läuft es still über Airable weiter, das fällt hier auf.
-- **Testmenü** (`TESTMENUE=ja`): Umlaute, AAC, nur-https, 302-Weiterleitung, langer Name.
+- **Testmenü** (`TESTMENUE=ja`): Umlaute, AAC, nur-https, 302-Weiterleitung, langer Name. Beim IWR 294: Umlaute
+  gehen, AAC nicht (nur MP3), https über den Server und 302 gehen.
 - **Sicherung:** `http://SERVER:8095/sicherung.json` lädt alle Daten als eine Datei.
 
 Nur Python-Standardbibliothek, ab Python 3.10. Kein pip.
@@ -69,12 +72,12 @@ Dem Radio im Router eine feste IP geben.
 | `PORT` | Port des Portals (Vorgabe 8095) |
 | `MITSCHNITT` | `ja`: jede Anfrage ins Journal und Antworten als Dateien (**privat**, enthält die Kennung des Radios). Nur zur Diagnose |
 | `TESTMENUE` | `ja`: Eintrag *Test* unten im Hauptmenü |
-| `UMLAUTE` | `umschreiben` (ae/oe/ue/ss, wie Airable) oder `utf8` |
+| `UMLAUTE` | `umschreiben` (ae/oe/ue/ss, wie Airable; Vorgabe) oder `utf8` (Umlaute, ß, é bleiben; Typografie wie „ “ – wird ersetzt, Emoji und fremde Schriften fallen weg). Beim IWR 294 funktioniert `utf8` |
 | `PORTAL_URL` | Adresse der Oberfläche, wie sie am Radio angezeigt wird |
 
 Daten liegen in `/var/lib/radio-portal`: `sender.json`, `favoriten.json`, `airable.json` (erfasste
 Tasten-IDs und Ersatz), `podcasts.json`, `radio.json`. Eigene IDs (Sender ab 1000001, Podcasts ab
-5000001) werden **nie neu vergeben**, denn die Tasten des Radios merken sie sich.
+5000001) werden **nie neu vergeben**, denn die FAV-Liste und die Tasten des Radios merken sie sich.
 
 ## Wenn das Radio plötzlich das alte Menü zeigt
 
