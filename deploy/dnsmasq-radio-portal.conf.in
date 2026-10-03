@@ -1,0 +1,13 @@
+# Radio-Portal: *.wifiradiofrontier.com zeigt auf diesen Rechner, alles andere
+# beantwortet die FRITZ!Box. Wird von deploy.sh aus dieser Vorlage erzeugt.
+listen-address=@PI_IP@
+# WLAN kommt beim Booten spaet, bind-interfaces wuerde dann scheitern
+bind-dynamic
+# nicht /etc/resolv.conf (kann fremde Server enthalten), nur die FRITZ!Box
+no-resolv
+server=@FRITZBOX@
+no-hosts
+address=/wifiradiofrontier.com/@PI_IP@
+# Uhrzeit normal aufloesen (das Radio fragt time.wifiradiofrontier.com per NTP)
+server=/time.wifiradiofrontier.com/@FRITZBOX@
+# Kein log-queries: Das Protokoll waere eine Liste aller besuchten Namen im Haus.

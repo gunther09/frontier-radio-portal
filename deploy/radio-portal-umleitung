@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Leitet Port 80 der Radio-IPs auf das Radio-Portal um (nur fuer Anfragen an PI_IP).
+#   radio-portal-umleitung an|aus
+# Liest RADIO_IPS, PI_IP und PORT aus /etc/radio-portal/radio-portal.env.
+# Idempotent. Bewusst nicht ueber ufws before.rules (ufw verdoppelt nat-Regeln beim
+# Reload) und nicht ueber das Paket nftables (sein "flush ruleset" nimmt ufw und Docker
+# die Regeln).
+set -euo pipefail
+
+# shellcheck disable=SC1091
+. /etc/radio-portal/radio-portal.env
+: "${RADIO_IPS:?}" "${PI_IP:?}" "${PORT:?}"
+TAG=radio-portal
+
+regeln_loeschen() {
+    # Alle Regeln mit unserem Kommentar entfernen (Nummern von hinten nach vorn).
+    local n
+    for n in $(iptables -t nat -L PREROUTING -n --line-numbers | awk -v t="$TAG" '$0 ~ t {print $1}' | sort -rn); do
+        iptables -t nat -D PREROUTING "$n"
+    done
+}
+
+case "${1:-}" in
+an)
+    regeln_loeschen   # so bleibt auch bei geaenderter Radio-Liste nichts Altes stehen
+    for ip in $RADIO_IPS; do
+        iptables -t nat -C PREROUTING -s "$ip" -d "$PI_IP" -p tcp --dport 80 \
+            -m comment --comment "$TAG" -j REDIRECT --to-ports "$PORT" 2>/dev/null ||
+        iptables -t nat -I PREROUTING -s "$ip" -d "$PI_IP" -p tcp --dport 80 \
+            -m comment --comment "$TAG" -j REDIRECT --to-ports "$PORT"
+    done
+    ;;
+aus)
+    regeln_loeschen
+    ;;
+*)
+    echo "Aufruf: $0 an|aus" >&2
+    exit 2
+    ;;
+esac
+iptables -t nat -L PREROUTING -n | grep "$TAG" || echo "(keine Umleitung aktiv)"

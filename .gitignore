@@ -1,0 +1,6 @@
+deploy/haus.env
+daten/
+mitschnitt/
+__pycache__/
+*.pyc
+*.kaputt

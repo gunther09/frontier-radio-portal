@@ -1,0 +1,39 @@
+[Unit]
+Description=Radio-Portal (Weiche und Oberflaeche fuer alte Frontier-Silicon-Radios, Port 8095)
+After=network-online.target
+Wants=network-online.target
+
+# Bremse gegen Neustart-Endlosschleifen
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=radioportal
+Group=radioportal
+WorkingDirectory=/opt/radio-portal/app
+ExecStart=/usr/bin/python3 -m radioportal
+EnvironmentFile=/etc/radio-portal/radio-portal.env
+# LAN-only ueber ufw (Regel fuer das Heimnetz auf dem Port), kein Tunnel
+Environment=HOST=0.0.0.0
+Environment=DATA_DIR=/var/lib/radio-portal
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ReadWritePaths=/var/lib/radio-portal
+MemoryMax=128M
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target

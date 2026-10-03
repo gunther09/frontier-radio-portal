@@ -1,0 +1,13 @@
+[Unit]
+Description=Radio-Portal: Port 80 -> Portal, nur fuer die Radio-IPs
+After=ufw.service network-online.target
+Wants=ufw.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/radio-portal-umleitung an
+ExecStop=/usr/local/sbin/radio-portal-umleitung aus
+
+[Install]
+WantedBy=multi-user.target
