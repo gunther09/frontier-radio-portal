@@ -1,17 +1,19 @@
 """Weboberflaeche (Heimnetz, ohne Anmeldung). Desktop zuerst: Tabellen, breite Seite;
-auf dem Handy bleibt sie benutzbar. HTML kommt vom Server, Formulare per POST mit Redirect."""
+auf dem Handy bleibt sie benutzbar. HTML kommt vom Server, Formulare per POST mit Redirect.
+
+Zwei Seiten: *Sender* (die Liste am Radio, Suche, Adresse, Ausgeblendete, Anfrage-Protokoll)
+und *Podcasts*."""
 
 from __future__ import annotations
 
 import datetime
 import html
+import json
 import logging
 import threading
 import urllib.parse
 
 from . import __version__
-from . import probe as probe_mod
-from . import radio
 from . import podcasts as pod
 from .radiobrowser import RadioBrowserError
 
@@ -30,7 +32,7 @@ nav{max-width:1180px;margin:auto;padding:.6rem 1rem;display:flex;gap:1.2rem;flex
 nav b{margin-right:1rem}nav a{color:var(--fg);text-decoration:none;padding:.15rem 0}
 nav a.on{border-bottom:2px solid var(--acc);color:var(--acc)}
 main{max-width:1180px;margin:auto;padding:1rem}main a{color:var(--acc)}
-h1{font-size:1.35rem;margin:.4rem 0 1rem}h2{font-size:1.1rem;margin:1.6rem 0 .6rem}
+h1{font-size:1.35rem;margin:.4rem 0 1rem}h2{font-size:1.1rem;margin:1.8rem 0 .6rem}
 table{border-collapse:collapse;width:100%;background:var(--card);border:1px solid var(--line)}
 th,td{text-align:left;padding:.45rem .7rem;border-bottom:1px solid var(--line);vertical-align:top}
 th{font-size:.8rem;text-transform:uppercase;letter-spacing:.04em;color:var(--mute);background:var(--bg)}
@@ -38,6 +40,7 @@ td.r{white-space:nowrap;text-align:right}
 .mute{color:var(--mute)}.klein{font-size:.82rem;word-break:break-all}
 .ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}
 .msg{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--acc);padding:.6rem .9rem;margin:0 0 1rem}
+.tipp{background:var(--card);border:1px solid var(--line);padding:.6rem .9rem;margin:1rem 0}
 form{display:inline;margin:0}
 button,input[type=submit]{font:inherit;padding:.25rem .7rem;border:1px solid var(--line);background:var(--card);
 color:var(--fg);border-radius:4px;cursor:pointer}
@@ -47,12 +50,11 @@ border-radius:4px;background:var(--card);color:var(--fg)}
 .row{display:flex;gap:.6rem;flex-wrap:wrap;align-items:center;margin:.4rem 0}
 .row label{min-width:5rem}.grow{flex:1;min-width:14rem}
 .leer{padding:1.5rem;text-align:center;color:var(--mute);background:var(--card);border:1px dashed var(--line)}
+details{margin:1.8rem 0}summary{cursor:pointer;font-weight:600}
 @media(max-width:700px){.hide-m{display:none}}
 """
 
-NAV = (("/", "Favoriten"), ("/suche", "Sender suchen"), ("/neu", "Sender per Adresse"),
-       ("/podcasts", "Podcasts"),
-       ("/sender", "Alle Sender"), ("/tasten", "FAV-Liste"))
+NAV = (("/", "Sender"), ("/podcasts", "Podcasts"))
 
 
 class Result:
@@ -89,7 +91,7 @@ def status_badge(s: dict) -> str:
     """Kann das Radio den Sender spielen? (Anzeige fuer den Nutzer)"""
     codec = (s.get("codec") or "").upper()
     https = (s.get("url") or "").lower().startswith("https://")
-    if codec in ("AAC", "HLS", "OGG", "WMA", "PLS", "M3U") and codec != "MP3":
+    if codec in ("AAC", "HLS", "OGG", "WMA", "PLS", "M3U"):
         return f'<span class="warn" title="{esc(s.get("hinweis", ""))}">{esc(codec)}: spielt am Radio nicht</span>'
     if https:
         return '<span class="ok" title="Der Server holt den Strom">über Server</span>'
@@ -101,12 +103,30 @@ def fmt_codec(s: dict) -> str:
     return f"{esc(s.get('codec') or '?')}{kb}"
 
 
+def kurzzeit(iso: str) -> str:
+    try:
+        return datetime.datetime.fromisoformat(iso).strftime("%d.%m. %H:%M")
+    except (TypeError, ValueError):
+        return ""
+
+
+def am_radio(s: dict) -> str:
+    """Wann hat das Radio den Sender zuletzt nachgeschlagen?"""
+    z = s.get("radio_zuletzt")
+    if z is None:
+        return '<span class="mute" title="nicht erfasst (Sender stammt aus Version 0.2)">–</span>'
+    if not z:
+        return '<span class="mute">noch nie</span>'
+    return esc(kurzzeit(z))
+
+
 def radio_status(portal) -> str:
     """Statuszeile(n) zu den Radios: meldet es sich bei uns, oder laeuft es still ueber Airable?"""
     radios = portal.radios.snapshot()
     if not radios:
-        return ('<div class="msg">Noch kein Radio hat sich am Portal gemeldet. Stimmen DNS 1 (der Server) und '
-                'Gateway am Radio? Das Radio merkt sich DNS-Antworten minutenlang: einmal Strom trennen.</div>')
+        return ('<div class="msg">Noch kein Radio hat sich am Portal gemeldet. Am Radio müssen DNS 1 und DNS 2 '
+                'auf diesen Server zeigen, dazu das Gateway auf den Router. Danach einmal den Netzstecker ziehen: '
+                'Das Radio merkt sich DNS-Antworten lange.</div>')
     now = datetime.datetime.now().astimezone()
     zeilen = []
     for ip, e in sorted(radios.items()):
@@ -124,81 +144,148 @@ def radio_status(portal) -> str:
         else:
             vor = f"vor {sek // 86400} Tagen"
         cls = "ok" if sek < 6 * 3600 else "warn"
-        hinweis = "" if sek < 6 * 3600 else (" · Nichts gehört. Normal, wenn das Radio aus ist; sonst fragt es "
-                                             "vielleicht die FRITZ!Box statt des Servers (Netzwerk-Einstellungen am Radio prüfen).")
+        hinweis = "" if sek < 6 * 3600 else (
+            " · Nichts gehört. Normal, wenn das Radio aus ist oder seit Stunden denselben Sender spielt. Zeigt es "
+            "das alte Airable-Menü: Am Radio müssen DNS 1 und DNS 2 auf den Server zeigen, danach Netzstecker ziehen.")
         zeilen.append(f'<span class="{cls}">●</span> Radio <b>{esc(ip)}</b> hat sich zuletzt {vor} am Portal '
-                      f'gemeldet ({esc(e["zuletzt"][:16].replace("T", " "))}), {int(e.get("anfragen", 0))} Anfragen '
+                      f'gemeldet ({esc(kurzzeit(e["zuletzt"]))}), {int(e.get("anfragen", 0))} Anfragen '
                       f'insgesamt.{esc(hinweis)}')
     return '<p>' + '<br>'.join(zeilen) + '</p>'
 
 
 # ---------------------------------------------------------------------------------------------------
-def seite_favoriten(portal, qs) -> Result:
+def _liste_tabelle(portal) -> str:
     lib = portal.library
-    favs = lib.favorites()
     zeilen = []
-    for i, sid in enumerate(favs):
+    for i, sid in enumerate(lib.liste()):
         s = lib.sender(sid)
         if not s:
             continue
+        info = f"Nr. {esc(sid)}" + (f" · {esc(s['genre'])}" if s.get("genre") else "")
         zeilen.append(
-            f'<tr><td class="mute">{i + 1}</td><td><b>{esc(s["name"])}</b>'
-            f'<div class="klein mute">{esc(s.get("genre", ""))}</div></td>'
-            f'<td class="hide-m">{esc(s.get("land", ""))}</td><td>{fmt_codec(s)}</td><td>{status_badge(s)}</td>'
-            f'<td class="r">{knopf("/favorit/hoch", "↑", id=sid)} {knopf("/favorit/runter", "↓", id=sid)} '
-            f'{knopf("/favorit/weg", "✕", id=sid)}</td></tr>')
-    if zeilen:
-        tab = ("<table><tr><th>Platz<th>Sender<th class=hide-m>Land<th>Format<th>Radio<th></tr>"
-               + "".join(zeilen) + "</table>")
-    else:
-        tab = ('<div class="leer">Noch keine Favoriten. <a href="/suche">Sender suchen</a> oder '
-               '<a href="/neu">per Adresse hinzufügen</a>.</div>')
-    n_air = len(portal.store.snapshot())
-    info = (f'<p class="mute">Am Radio unter <b>Internet Radio → Favoriten</b> (ganz oben im Menü). '
-            f'Reihenfolge wie hier. Der FAV-Eintrag „Favorit 3“ spielt immer Platz 3 '
-            f'(Plätze 1–{radio.PLAETZE}, einmal am Radio unter <i>Favoriten → Favorit-Plaetze</i> mit FAV halten speichern). {n_air} Airable-Sender vom Radio erfasst: '
-            f'<a href="/tasten">FAV-Liste</a>.</p>')
-    return page("Favoriten", radio_status(portal) + info + tab, "/", qs.get("m", [""])[0])
+            f'<tr><td class="mute">{i + 1}</td><td><b>{esc(s["name"])}</b><div class="klein mute">{info}</div></td>'
+            f'<td class="hide-m">{fmt_codec(s)}</td><td>{status_badge(s)}</td><td class="hide-m">{am_radio(s)}</td>'
+            f'<td class="r">{knopf("/sender/hoch", "↑", id=sid)} {knopf("/sender/runter", "↓", id=sid)} '
+            f'<a href="/sender/bearbeiten?id={esc(sid)}">Bearbeiten</a> '
+            f'{knopf("/sender/ausblenden", "Ausblenden", id=sid)}</td></tr>')
+    if not zeilen:
+        return '<div class="leer">Noch keine Sender. Unten suchen oder per Adresse hinzufügen.</div>'
+    return ("<table><tr><th>#<th>Sender<th class=hide-m>Format<th>Radio<th class=hide-m>Zuletzt am Radio<th></tr>"
+            + "".join(zeilen) + "</table>")
 
 
-def seite_suche(portal, qs) -> Result:
-    q = qs.get("q", [""])[0].strip()
-    alle = qs.get("alle", [""])[0] == "1"
-    form = (f'<form method="get" action="/suche" class="row"><input type="search" name="q" class="grow" '
-            f'value="{esc(q)}" placeholder="Sendername, z. B. Rock Antenne" autofocus>'
+def _suche(portal, q: str, alle: bool) -> str:
+    form = (f'<form method="get" action="/#hinzufuegen" class="row"><input type="search" name="q" class="grow" '
+            f'value="{esc(q)}" placeholder="Sendername, z. B. Rock Antenne">'
             f'<label><input type="checkbox" name="alle" value="1"{" checked" if alle else ""}> '
-            f'auch AAC &amp; andere (spielen evtl. nicht)</label><button class="pri">Suchen</button></form>')
-    inhalt = form
-    if q:
-        try:
-            treffer = portal.rb.search(q, mp3_only=not alle)
-        except RadioBrowserError as e:
-            return page("Sender suchen", form + f'<p class="bad">{esc(str(e))}</p>', "/suche")
-        zeilen = []
-        for t in treffer:
-            https = t["url"].lower().startswith("https://")
-            zeilen.append(
-                f'<tr><td><b>{esc(t["name"])}</b><div class="klein mute">{esc(t["tags"])}</div></td>'
-                f'<td class="hide-m">{esc(t["countrycode"])}</td>'
-                f'<td>{esc(t["codec"])} {esc(str(t["bitrate"]))}</td>'
-                f'<td class="hide-m">{"https" if https else "http"}</td>'
-                f'<td class="r">{knopf("/favorit/uebernehmen", "★ Favorit", "pri", uuid=t["stationuuid"])}</td></tr>')
-        inhalt += (f'<p class="mute">{len(treffer)} Treffer, http zuerst. Beim Übernehmen wird die Adresse geprüft '
-                   f'(dauert ein paar Sekunden).</p>' if treffer else '<div class="leer">Keine Treffer.</div>')
-        if zeilen:
-            inhalt += ("<table><tr><th>Sender<th class=hide-m>Land<th>Format<th class=hide-m>Weg<th></tr>"
-                       + "".join(zeilen) + "</table>")
-    return page("Sender suchen", inhalt, "/suche", qs.get("m", [""])[0])
+            f'auch AAC &amp; andere (spielen am Radio nicht)</label><button class="pri">Suchen</button></form>')
+    if not q:
+        return form
+    try:
+        treffer = portal.rb.search(q, mp3_only=not alle)
+    except RadioBrowserError as e:
+        return form + f'<p class="bad">{esc(str(e))}</p>'
+    if not treffer:
+        return form + '<div class="leer">Keine Treffer.</div>'
+    lib = portal.library
+    liste = set(lib.liste())
+    bekannt = {s.get("rb_uuid"): sid for sid, s in lib.all_senders().items() if s.get("rb_uuid")}
+    zeilen = []
+    for t in treffer:
+        sid = bekannt.get(t["stationuuid"])
+        if sid in liste:
+            akt = '<span class="mute">steht in der Liste</span>'
+        else:
+            akt = knopf("/sender/hinzufuegen", "Wieder einblenden" if sid else "Hinzufügen", "pri",
+                        uuid=t["stationuuid"])
+        https = t["url"].lower().startswith("https://")
+        zeilen.append(
+            f'<tr><td><b>{esc(t["name"])}</b><div class="klein mute">{esc(t["tags"])}</div></td>'
+            f'<td class="hide-m">{esc(t["countrycode"])}</td><td>{esc(t["codec"])} {esc(str(t["bitrate"]))}</td>'
+            f'<td class="hide-m">{"https" if https else "http"}</td><td class="r">{akt}</td></tr>')
+    return (form + f'<p class="mute">{len(treffer)} Treffer bei radio-browser.info, http zuerst. Beim Hinzufügen '
+            f'wird die Adresse geprüft (dauert ein paar Sekunden).</p>'
+            "<table><tr><th>Sender<th class=hide-m>Land<th>Format<th class=hide-m>Weg<th></tr>" + "".join(zeilen)
+            + "</table>")
 
 
-def seite_neu(portal, qs, name="", url="", ergebnis=None, fehler="") -> Result:
-    form = (f'<form method="post" action="/neu"><div class="row"><label>Name</label>'
+def _ausgeblendet(portal) -> str:
+    lib = portal.library
+    zeilen = []
+    for sid in lib.ausgeblendet():
+        s = lib.sender(sid)
+        if lib.loeschbar(sid):
+            weg = knopf("/sender/loeschen", "Löschen", id=sid)
+        else:
+            weg = '<span class="klein mute" title="Das Radio hat ihn gespielt: er kann auf der FAV-Taste liegen">bleibt</span>'
+        zeilen.append(
+            f'<tr><td><b>{esc(s["name"])}</b><div class="klein mute">Nr. {esc(sid)}</div></td>'
+            f'<td class="hide-m">{am_radio(s)}</td>'
+            f'<td class="r">{knopf("/sender/einblenden", "Einblenden", id=sid)} '
+            f'<a href="/sender/bearbeiten?id={esc(sid)}">Bearbeiten</a> {weg}</td></tr>')
+    if not zeilen:
+        return ""
+    return ('<h2>Ausgeblendet</h2><p class="mute">Nicht im Menü des Radios, auf der FAV-Taste spielen sie weiter. '
+            'Löschen geht nur bei Sendern, die das Radio nie gespielt hat.</p>'
+            "<table><tr><th>Sender<th class=hide-m>Zuletzt am Radio<th></tr>" + "".join(zeilen) + "</table>")
+
+
+def _protokoll(portal) -> str:
+    eintraege = portal.anfragen.snapshot()
+    if not eintraege:
+        return ('<details><summary>Letzte Anfragen des Radios</summary><p class="mute">Seit dem letzten Start des '
+                'Dienstes keine.</p></details>')
+    lib, pods = portal.library, portal.podcasts
+    zeilen = []
+    for e in eintraege[:100]:
+        name = ""
+        if e["id"]:
+            s = lib.sender(e["id"]) or pods.get(e["id"])
+            if s:
+                name = s["name"]
+            elif pods.find_episode(e["id"]):
+                name = pods.find_episode(e["id"])[1]["titel"]
+        cls = "ok" if e["status"] < 400 else "bad"
+        was = esc(e["was"]) + (" " + esc(e["id"]) if e["id"] else "")
+        if name:
+            was += f'<div class="klein mute">{esc(name)}</div>'
+        zeilen.append(
+            f'<tr><td class="klein">{esc(e["zeit"][11:19])}</td><td class="hide-m klein">{esc(e["ip"])}</td>'
+            f'<td>{was}</td><td class="{cls}">{int(e["status"])}</td><td>{esc(e["weg"])}</td></tr>')
+    return ('<details><summary>Letzte Anfragen des Radios (Fehlersuche)</summary>'
+            '<p class="mute">Nur seit dem letzten Start des Dienstes, neueste zuerst. „Airable“ heißt: Das Portal '
+            'kannte die Anfrage nicht und hat sie weitergereicht.</p>'
+            "<table><tr><th>Zeit<th class=hide-m>Radio<th>Anfrage<th>Antwort<th>Weg</tr>" + "".join(zeilen)
+            + "</table></details>")
+
+
+def seite_sender(portal, qs) -> Result:
+    n_pod = len(portal.podcasts.all())
+    darunter = (f'<p class="mute">Darunter am Radio: <b>Podcasts</b> (<a href="/podcasts">{n_pod} abonniert</a>).</p>'
+                if n_pod else "")
+    tipp = ('<div class="tipp"><b>So steht es am Radio:</b> <i>Internet Radio → Senderliste</i>, in dieser '
+            'Reihenfolge.<br><b>FAV-Taste belegen:</b> den Sender am Radio spielen, FAV gedrückt halten, Platz wählen. '
+            'Das Radio merkt sich die Nummer und den Namen von diesem Moment. Die Nummer spielt für immer denselben '
+            'Sender: Name und Adresse kannst du hier ändern, <i>Ausblenden</i> nimmt ihn nur aus dem Menü, auf der '
+            'FAV-Taste spielt er weiter. Lange Namen deshalb vor dem Speichern kürzen (<i>Bearbeiten</i>).</div>')
+    q = qs.get("q", [""])[0].strip()
+    adresse = ('<h3>Per Adresse</h3><form method="post" action="/sender/adresse" class="row">'
+               '<input type="text" name="name" placeholder="Name (optional)">'
+               '<input type="url" name="url" class="grow" placeholder="http://… (Stream, .m3u oder .pls)" required>'
+               '<button>Prüfen</button></form>')
+    inhalt = (radio_status(portal) + _liste_tabelle(portal) + darunter + tipp
+              + '<h2 id="hinzufuegen">Sender hinzufügen</h2>' + _suche(portal, q, qs.get("alle", [""])[0] == "1")
+              + adresse + _ausgeblendet(portal) + _protokoll(portal))
+    return page("Sender", inhalt, "/", qs.get("m", [""])[0])
+
+
+def seite_adresse(portal, qs, name="", url="", ergebnis=None, fehler="") -> Result:
+    form = (f'<form method="post" action="/sender/adresse"><div class="row"><label>Name</label>'
             f'<input type="text" name="name" class="grow" value="{esc(name)}" placeholder="optional"></div>'
             f'<div class="row"><label>Adresse</label><input type="url" name="url" class="grow" '
             f'value="{esc(url)}" placeholder="http://… (Stream, .m3u oder .pls)" required>'
             f'<button class="pri">Prüfen</button></div></form>')
-    inhalt = ('<p class="mute">Die Adresse wird vorher geprüft: Erreichbarkeit, MP3 oder nicht, http oder https.</p>'
-              + form)
+    inhalt = '<p class="mute">Die Adresse wird geprüft: Erreichbarkeit, MP3 oder nicht, http oder https.</p>' + form
     if fehler:
         inhalt += f'<p class="bad">{esc(fehler)}</p>'
     if ergebnis is not None:
@@ -208,99 +295,35 @@ def seite_neu(portal, qs, name="", url="", ergebnis=None, fehler="") -> Result:
         if r.ok:
             inhalt += (f'<p>Format: <b>{esc(r.codec)}</b>{" · " + esc(r.bitrate) + " kbit/s" if r.bitrate else ""}'
                        f'<br><span class="klein mute">{esc(r.start)}</span></p>'
-                       + knopf("/neu/speichern", "Speichern und als Favorit", "pri", name=name or r.name or url,
+                       + knopf("/sender/adresse/speichern", "Zur Liste hinzufügen", "pri", name=name or r.name or url,
                                start=r.start, orig=url, codec=r.codec, bitrate=r.bitrate, hinweis=r.hinweis))
-    return page("Sender per Adresse", inhalt, "/neu", qs.get("m", [""])[0])
+    inhalt += '<p><a href="/">Zurück zur Liste</a></p>'
+    return page("Sender per Adresse", inhalt, "/", qs.get("m", [""])[0])
 
 
-def seite_sender(portal, qs) -> Result:
-    lib = portal.library
-    favs = set(lib.favorites())
-    ersatz = portal.store.ersatz_ids()
-    zeilen = []
-    for sid, s in sorted(lib.all_senders().items(), key=lambda kv: int(kv[0])):
-        akt = []
-        if sid not in favs:
-            akt.append(knopf("/favorit/add", "★", id=sid))
-        akt.append(knopf("/sender/pruefen", "Prüfen", id=sid))
-        if sid not in favs and sid not in ersatz:
-            akt.append(knopf("/sender/entfernen", "Entfernen", id=sid))
-        marke = (" ★" if sid in favs else "") + (" ⌨" if sid in ersatz else "")
-        zeilen.append(
-            f'<tr><td class="mute">{esc(sid)}</td><td><b>{esc(s["name"])}</b>{marke}'
-            f'<div class="klein mute">{esc(s.get("start", s["url"]))}</div></td>'
-            f'<td>{fmt_codec(s)}</td><td>{status_badge(s)}</td><td class="r">{" ".join(akt)}</td></tr>')
-    tab = ("<table><tr><th>ID<th>Sender<th>Format<th>Radio<th></tr>" + "".join(zeilen) + "</table>"
-           if zeilen else '<div class="leer">Noch keine eigenen Sender.</div>')
-    leg = '<p class="mute">★ = Favorit, ⌨ = ersetzt einen Eintrag der FAV-Liste. Diese lassen sich nicht entfernen.</p>'
-    return page("Alle Sender", leg + tab, "/sender", qs.get("m", [""])[0])
-
-
-def seite_tasten(portal, qs) -> Result:
-    lib = portal.library
-    eigene = sorted(lib.all_senders().values(), key=lambda s: s["name"].lower())
-    opts = "".join(f'<option value="{radio.PLATZ_ERSTE + n - 1}">Favorit {n} (jeweils der {n}. Favorit)</option>'
-                   for n in range(1, radio.PLAETZE + 1))
-    opts += "".join(f'<option value="{esc(s["id"])}">{esc(s["name"])}</option>' for s in eigene)
-    zeilen = []
-    air = portal.store.snapshot()
-    for aid, e in sorted(air.items(), key=lambda kv: kv[1].get("zuletzt", ""), reverse=True):
-        eid = e.get("ersatz_id", "")
-        nr = radio.platz_nr(eid) if eid else 0
-        es = radio.lookup(portal, aid) if eid else None
-        if nr or es:
-            ziel = (f"Favorit {nr}" + (f" (jetzt: {es['name']})" if es else " (noch leer)")) if nr else es["name"]
-            ers = (f'<span class="ok">→ {esc(ziel)}</span> '
-                   + knopf("/tasten/ersatz", "Entfernen", aid=aid, sid=""))
-        else:
-            ers = (f'<form method="post" action="/tasten/ersatz"><input type="hidden" name="aid" value="{esc(aid)}">'
-                   f'<select name="sid">{opts}</select> <button>Setzen</button></form> '
-                   f'<a href="/tasten/vorschlag?id={esc(aid)}">Vorschlag suchen</a>')
-        zeilen.append(
-            f'<tr><td><b>{esc(e.get("name") or "(unbekannt)")}</b>'
-            f'<div class="klein mute">ID {esc(aid)} · {esc(e.get("format", ""))} · {esc(e.get("ort", ""))} · '
-            f'{esc(str(e.get("bitrate", "")))} kbit/s</div><div class="klein mute">{esc(e.get("airable_url", ""))}</div></td>'
-            f'<td class="hide-m klein">{int(e.get("gespielt", 0))}× · {esc(e.get("zuletzt", "")[:16].replace("T", " "))}</td>'
-            f'<td>{ers}</td></tr>')
-    erkl = ('<p class="mute">Die FAV-Taste des Radios (und bei anderen Modellen die Stationstasten) speichert nur die Airable-ID. Wählst du hier '
-            'einen Ersatz-Sender, antwortet dieses Portal selbst auf die Taste, auch wenn Airable abschaltet. '
-            'Erfasst wird, was das Radio nachschlägt oder abspielt: den Eintrag in der FAV-Liste einmal aufrufen, dann erscheint er hier. '
-            'Neue Einträge in der FAV-Liste, die du am Radio selbst anlegst, tragen unsere IDs und brauchen keinen Ersatz.</p>')
-    tab = ("<table><tr><th>Airable-Sender am Radio<th class=hide-m>Gespielt · zuletzt<th>Ersatz-Sender</tr>"
-           + "".join(zeilen) + "</table>") if zeilen else '<div class="leer">Noch nichts erfasst.</div>'
-    plaetze = "".join(
-        f"<tr><td>Favorit {n}<td>" + (esc(radio.platz_sender(portal, n)["name"]) if radio.platz_sender(portal, n) else
-                                      '<span class="mute">noch leer</span>') + "</tr>"
-        for n in range(1, radio.PLAETZE + 1))
-    ohne = [a for a, e in air.items() if not e.get("ersatz_id")]
-    reihe = (knopf("/tasten/reihe", "Alle Einträge ohne Ersatz der Reihe nach auf Favorit 1, 2, 3 … legen", "pri")
-             if ohne else "")
-    unten = ("<h2>Favorit-Plätze</h2><p class=\"mute\">Am Radio unter <i>Internetradio → Favoriten → Favorit-Plätze</i>: "
-             "den Platz anspielen und FAV halten. Die FAV-Liste zeigt dann immer „Favorit k“, gespielt wird der "
-             "k-te Favorit von hier.</p><table><tr><th>Platz<th>spielt jetzt</tr>" + plaetze + "</table>")
-    return page("FAV-Liste des Radios", erkl + reihe + tab + unten, "/tasten", qs.get("m", [""])[0])
-
-
-def seite_vorschlag(portal, qs) -> Result:
-    aid = qs.get("id", [""])[0]
-    e = portal.store.snapshot().get(aid)
-    if not e:
-        return redirect("/tasten", "Unbekannte Airable-ID.")
-    q = qs.get("q", [""])[0].strip() or e.get("name", "")
-    form = (f'<form method="get" action="/tasten/vorschlag" class="row"><input type="hidden" name="id" value="{esc(aid)}">'
-            f'<input type="search" name="q" class="grow" value="{esc(q)}"><button class="pri">Suchen</button></form>')
-    try:
-        treffer = portal.rb.search(q, mp3_only=True) if q else []
-    except RadioBrowserError as ex:
-        return page("Ersatz suchen", form + f'<p class="bad">{esc(str(ex))}</p>', "/tasten")
-    zeilen = "".join(
-        f'<tr><td><b>{esc(t["name"])}</b><div class="klein mute">{esc(t["tags"])}</div></td>'
-        f'<td>{esc(t["countrycode"])}</td><td>{esc(t["codec"])} {esc(str(t["bitrate"]))}</td>'
-        f'<td class="r">{knopf("/tasten/uebernehmen", "Als Ersatz", "pri", aid=aid, uuid=t["stationuuid"])}</td></tr>'
-        for t in treffer)
-    tab = ("<table><tr><th>Sender<th>Land<th>Format<th></tr>" + zeilen + "</table>"
-           if zeilen else '<div class="leer">Keine Treffer.</div>')
-    return page(f"Ersatz für „{e.get('name') or aid}“", form + tab, "/tasten")
+def seite_bearbeiten(portal, qs, sid: str = "", name=None, url=None, fehler="") -> Result:
+    sid = sid or qs.get("id", [""])[0]
+    s = portal.library.sender(sid)
+    if not s:
+        return redirect("/", "Unbekannter Sender.")
+    name = s["name"] if name is None else name
+    url = (s.get("url_orig") or s["url"]) if url is None else url
+    form = (f'<form method="post" action="/sender/bearbeiten"><input type="hidden" name="id" value="{esc(sid)}">'
+            f'<div class="row"><label>Name</label><input type="text" name="name" class="grow" value="{esc(name)}" required></div>'
+            f'<div class="row"><label>Adresse</label><input type="url" name="url" class="grow" value="{esc(url)}" required></div>'
+            f'<div class="row"><label></label><button class="pri">Speichern</button></div></form>')
+    fehl = f'<p class="bad">{esc(fehler)}</p>' if fehler else ""
+    gespielt = s["url"] if s["url"] != url else ""
+    info = (f'<table><tr><td>Nummer</td><td><b>{esc(sid)}</b> (bleibt für immer, die FAV-Taste speichert sie)</td></tr>'
+            f'<tr><td>Format</td><td>{fmt_codec(s)} · {status_badge(s)}<div class="klein mute">{esc(s.get("hinweis", ""))}</div></td></tr>'
+            + (f'<tr><td>Spielt</td><td class="klein">{esc(gespielt)}</td></tr>' if gespielt else "")
+            + f'<tr><td>Zuletzt am Radio</td><td>{am_radio(s)}</td></tr>'
+            f'<tr><td>Angelegt</td><td>{esc(kurzzeit(s.get("angelegt", "")))} · {esc(s.get("quelle", ""))}</td></tr></table>')
+    tipp = ('<p class="mute">Ein neuer Name erscheint sofort im Menü des Radios. Auf der FAV-Taste steht weiter der '
+            'Name vom Speichern, bis du den Platz am Radio neu belegst. Eine neue Adresse wird vorher geprüft.</p>')
+    inhalt = (fehl + form + tipp + info + '<p>' + knopf("/sender/pruefen", "Adresse jetzt prüfen", id=sid)
+              + ' <a href="/">Zurück zur Liste</a></p>')
+    return page(f"Sender bearbeiten: {s['name']}", inhalt, "/", qs.get("m", [""])[0])
 
 
 def seite_podcasts(portal, qs) -> Result:
@@ -313,15 +336,14 @@ def seite_podcasts(portal, qs) -> Result:
             f'<tr><td><b><a href="/podcast?id={esc(pid)}">{esc(p["name"])}</a></b>'
             f'<div class="klein mute">{esc(p["feed"])}</div></td>'
             f'<td>{len(p["episoden"])}</td><td>{"<b>%d</b>" % neu if neu else "0"}</td>'
-            f'<td class="hide-m klein">{esc(p.get("aktualisiert", "")[:16].replace("T", " "))}</td>'
+            f'<td class="hide-m klein">{esc(kurzzeit(p.get("aktualisiert", "")))}</td>'
             f'<td class="r">{knopf("/podcasts/aktualisieren", "Aktualisieren", id=pid)} '
             f'{knopf("/podcasts/gehoert", "Alle gehört", id=pid)} {knopf("/podcasts/entfernen", "✕", id=pid)}</td></tr>')
     tab = ("<table><tr><th>Podcast<th>Folgen<th>Neu<th class=hide-m>Aktualisiert<th></tr>" + "".join(zeilen) + "</table>"
            if zeilen else '<div class="leer">Noch kein Podcast abonniert.</div>')
-    erkl = ('<p class="mute">Eigene Podcasts laufen ohne Airable. Die RSS-Adresse steht meist auf der Webseite des '
-            'Podcasts („RSS“) oder bei Apple Podcasts/Spotify nicht, aber beim Anbieter. Am Radio erscheint '
-            '<b>Eigene Podcasts</b> im Hauptmenü; ungehörte Folgen tragen ein <b>*</b>. Der Server prüft alle '
-            'paar Stunden auf neue Folgen. Beim Abonnieren gelten nur die neuesten drei als ungehört.</p>')
+    erkl = ('<p class="mute">Am Radio steht <b>Podcasts</b> unten in der Senderliste; ungehörte Folgen tragen ein '
+            '<b>*</b>. Der Server prüft alle paar Stunden auf neue Folgen. Beim Abonnieren gelten nur die neuesten '
+            'drei als ungehört. Die RSS-Adresse steht meist auf der Webseite des Podcasts („RSS“).</p>')
     alle = knopf("/podcasts/aktualisieren", "Alle aktualisieren", id="alle") if zeilen else ""
     q = qs.get("q", [""])[0].strip()
     suche = (f'<h2>Podcast suchen</h2><form method="get" action="/podcasts" class="row">'
@@ -337,7 +359,7 @@ def seite_podcasts(portal, qs) -> Result:
                 f'<tr><td><b>{esc(r["name"])}</b><div class="klein mute">{esc(r["autor"])} · {esc(r["genre"])}</div></td>'
                 f'<td class="r">{knopf("/podcasts/neu", "Abonnieren", "pri", url=r["feed"])}</td></tr>' for r in treffer)
             suche += ("<table><tr><th>Podcast<th></tr>" + zl + "</table>") if zl else '<div class="leer">Keine Treffer.</div>'
-    return page("Podcasts", erkl + suche + "<h2>Abonniert</h2>" + tab + f'<p>{alle}</p>'
+    return page("Podcasts", erkl + "<h2>Abonniert</h2>" + tab + f'<p>{alle}</p>' + suche
                 + "<h2>Per RSS-Adresse</h2>" + form, "/podcasts", qs.get("m", [""])[0])
 
 
@@ -378,69 +400,68 @@ def _uebernehmen(portal, uuid: str) -> tuple[str | None, str]:
     return sid, r.hinweis
 
 
+def _in_die_liste(portal, sid: str, hint: str = "") -> Result:
+    lib = portal.library
+    name = lib.sender(sid)["name"]
+    if not lib.zeigen(sid):
+        return redirect("/", f"„{name}“ steht schon in der Liste.")
+    return redirect("/", f"„{name}“ steht jetzt in der Liste (Platz {len(lib.liste())}). {hint}".strip())
+
+
 def aktion(portal, path: str, form: dict) -> Result:
     lib = portal.library
     f = lambda k: (form.get(k) or [""])[0].strip()  # noqa: E731
 
-    if path == "/favorit/uebernehmen":
+    if path == "/sender/hinzufuegen":
         sid, hint = _uebernehmen(portal, f("uuid"))
-        if not sid:
-            return redirect("/suche", hint)
-        lib.fav_add(sid)
-        return redirect("/", f"„{lib.sender(sid)['name']}“ ist jetzt Favorit. {hint}")
-    if path in ("/favorit/add", "/favorit/hoch", "/favorit/runter", "/favorit/weg"):
+        return _in_die_liste(portal, sid, hint) if sid else redirect("/", hint)
+    if path in ("/sender/hoch", "/sender/runter", "/sender/ausblenden", "/sender/einblenden"):
         sid = f("id")
-        {"/favorit/add": lambda: lib.fav_add(sid), "/favorit/hoch": lambda: lib.fav_move(sid, -1),
-         "/favorit/runter": lambda: lib.fav_move(sid, 1), "/favorit/weg": lambda: lib.fav_remove(sid)}[path]()
-        return redirect("/sender" if path == "/favorit/add" else "/")
-    if path == "/neu":
+        {"/sender/hoch": lambda: lib.verschieben(sid, -1), "/sender/runter": lambda: lib.verschieben(sid, 1),
+         "/sender/ausblenden": lambda: lib.ausblenden(sid), "/sender/einblenden": lambda: lib.zeigen(sid)}[path]()
+        return redirect("/")
+    if path == "/sender/loeschen":
+        s = lib.sender(f("id"))
+        if s and lib.remove_sender(s["id"]):
+            return redirect("/", f"„{s['name']}“ gelöscht.")
+        return redirect("/", "Nicht gelöscht: Das Radio hat den Sender schon gespielt, er kann auf der FAV-Taste liegen.")
+    if path == "/sender/adresse":
         url = f("url")
-        r = portal.prober(url) if url else None
-        if r is None:
-            return seite_neu(portal, {}, f("name"), url, fehler="Bitte eine Adresse eingeben.")
-        return seite_neu(portal, {}, f("name"), url, ergebnis=r)
-    if path == "/neu/speichern":
+        if not url:
+            return seite_adresse(portal, {}, f("name"), url, fehler="Bitte eine Adresse eingeben.")
+        return seite_adresse(portal, {}, f("name"), url, ergebnis=portal.prober(url))
+    if path == "/sender/adresse/speichern":
         name, start = f("name"), f("start")
         if not name or not start:
-            return redirect("/neu", "Name oder Adresse fehlt.")
+            return redirect("/", "Name oder Adresse fehlt.")
         sid = lib.add_sender(name=name, url=start, codec=f("codec"), bitrate=f("bitrate"), quelle="manuell",
                              url_orig=f("orig") or start, hinweis=f("hinweis"))
-        lib.fav_add(sid)
-        return redirect("/", f"„{name}“ ist jetzt Favorit.")
+        return _in_die_liste(portal, sid)
+    if path == "/sender/bearbeiten":
+        sid, name, url = f("id"), f("name"), f("url")
+        s = lib.sender(sid)
+        if not s:
+            return redirect("/", "Unbekannter Sender.")
+        if not name or not url:
+            return seite_bearbeiten(portal, {}, sid, name, url, fehler="Name und Adresse dürfen nicht leer sein.")
+        felder, zusatz = {"name": name}, ""
+        if url != (s.get("url_orig") or s["url"]):
+            r = portal.prober(url)
+            if not r.ok:
+                return seite_bearbeiten(portal, {}, sid, name, url, fehler=f"Nicht gespeichert: {r.hinweis}")
+            felder.update(url=r.start, url_orig=url, codec=r.codec, bitrate=r.bitrate or s.get("bitrate", ""),
+                          hinweis=r.hinweis)
+            zusatz = f" Neue Adresse: {r.hinweis}"
+        lib.update_sender(sid, **felder)
+        return redirect("/", f"„{name}“ gespeichert.{zusatz}")
     if path == "/sender/pruefen":
         s = lib.sender(f("id"))
         if not s:
-            return redirect("/sender", "Unbekannter Sender.")
+            return redirect("/", "Unbekannter Sender.")
         r = portal.prober(s.get("url_orig") or s["url"])
         if r.ok:
             lib.update_sender(s["id"], url=r.start, codec=r.codec, hinweis=r.hinweis)
-        return redirect("/sender", f"„{s['name']}“: {r.hinweis}")
-    if path == "/sender/entfernen":
-        s = lib.sender(f("id"))
-        ok = bool(s) and lib.remove_sender(f("id"), portal.store.ersatz_ids())
-        return redirect("/sender", f"„{s['name']}“ entfernt." if ok else "Nicht entfernt (Favorit oder Taste).")
-    if path == "/tasten/ersatz":
-        aid, sid = f("aid"), f("sid")
-        if sid and not lib.sender(sid) and not radio.platz_nr(sid):
-            return redirect("/tasten", "Unbekannter Sender.")
-        ok = portal.store.set_ersatz(aid, sid or None)
-        return redirect("/tasten", ("Ersatz gesetzt." if sid else "Ersatz entfernt.") if ok else "Unbekannte ID.")
-    if path == "/tasten/reihe":
-        n = 0
-        for aid, e in sorted(portal.store.snapshot().items(), key=lambda kv: kv[1].get("name", "").lower()):
-            if not e.get("ersatz_id") and n < radio.PLAETZE:
-                portal.store.set_ersatz(aid, str(radio.PLATZ_ERSTE + n))
-                n += 1
-        return redirect("/tasten", f"{n} Einträge auf Favorit 1 bis {n} gelegt.")
-    if path == "/tasten/uebernehmen":
-        aid = f("aid")
-        if aid not in portal.store.snapshot():
-            return redirect("/tasten", "Unbekannte Airable-ID.")
-        sid, hint = _uebernehmen(portal, f("uuid"))
-        if not sid:
-            return redirect(f"/tasten/vorschlag?id={aid}", hint)
-        portal.store.set_ersatz(aid, sid)
-        return redirect("/tasten", f"Ersatz: „{lib.sender(sid)['name']}“. {hint}")
+        return redirect(f"/sender/bearbeiten?id={s['id']}", f"Prüfung: {r.hinweis}")
 
     if path == "/podcasts/neu":
         url = f("url")
@@ -484,16 +505,15 @@ def _origin_ok(headers: dict) -> bool:
     return urllib.parse.urlsplit(origin).netloc.lower() == host.lower()
 
 
-GET_SEITEN = {"/": seite_favoriten, "/suche": seite_suche, "/sender": seite_sender, "/tasten": seite_tasten,
-              "/tasten/vorschlag": seite_vorschlag, "/podcasts": seite_podcasts, "/podcast": seite_podcast, "/neu": lambda p, q: seite_neu(p, q)}
+GET_SEITEN = {"/": seite_sender, "/sender/bearbeiten": seite_bearbeiten, "/sender/adresse": seite_adresse,
+              "/podcasts": seite_podcasts, "/podcast": seite_podcast}
 
 
 def sicherung(portal) -> Result:
-    """Alle Daten als eine JSON-Datei zum Herunterladen (Sender, Favoriten, FAV-Zuordnung, Podcasts)."""
-    import json
+    """Alle Daten als eine JSON-Datei zum Herunterladen (Sender, Senderliste, Podcasts)."""
     data = {"erstellt": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
-            "version": __version__, "sender": portal.library.all_senders(), "favoriten": portal.library.favorites(),
-            "airable": portal.store.snapshot(), "podcasts": portal.podcasts.all()}
+            "version": __version__, "sender": portal.library.all_senders(), "senderliste": portal.library.liste(),
+            "podcasts": portal.podcasts.all()}
     body = json.dumps(data, ensure_ascii=False, indent=1, sort_keys=True).encode("utf-8")
     name = "kuechenradio-sicherung-" + datetime.date.today().isoformat() + ".json"
     return Result(200, "application/json; charset=utf-8", body,

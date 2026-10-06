@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import socket
 import ssl
+import time
 import urllib.parse
 from dataclasses import dataclass, field
 
@@ -126,9 +127,15 @@ def _first_playlist_url(text: str, kind: str) -> str:
     return ""
 
 
-def _one(url: str, timeout: float, log: list):
-    """Folgt Weiterleitungen und Playlists. Gibt (endgueltige Adresse, Status, Header, Body, icy)."""
+def _one(url: str, timeout: float, log: list, deadline: float | None = None):
+    """Folgt Weiterleitungen und Playlists. Gibt (endgueltige Adresse, Status, Header, Body, icy).
+    `deadline` (time.monotonic): danach wird kein weiterer Sprung mehr versucht."""
     for _ in range(MAX_REDIRECTS + 2):
+        if deadline is not None:
+            rest = deadline - time.monotonic()
+            if rest <= 0.2:
+                raise OSError("Zeit fuer das Aufloesen abgelaufen")
+            timeout = min(timeout, rest)
         status, headers, body, icy = _fetch(url, timeout, body_bytes=4096)
         log.append(f"{status} {url[:100]}")
         if status in REDIRECTS and headers.get("location"):
@@ -195,11 +202,12 @@ def probe(url: str, timeout: float = TIMEOUT) -> Result:
     return r
 
 
-def resolve_for_play(start: str, timeout: float = TIMEOUT) -> str:
+def resolve_for_play(start: str, timeout: float = TIMEOUT, budget: float = 5.0) -> str:
     """Loest Weiterleitungen und Playlists der gespeicherten Adresse jetzt auf, damit das Radio
-    sie direkt ohne weiteren Sprung abrufen kann. Bei einem Fehler bleibt die Adresse unveraendert."""
+    sie direkt ohne weiteren Sprung abrufen kann. Das Radio wartet derweil: hoechstens `budget`
+    Sekunden insgesamt. Bei einem Fehler bleibt die Adresse unveraendert."""
     try:
-        final, status, _headers, _body, _icy = _one(start, timeout, [])
+        final, status, _headers, _body, _icy = _one(start, timeout, [], time.monotonic() + budget)
     except (OSError, ssl.SSLError):
         return start
     return final if status == 200 else start

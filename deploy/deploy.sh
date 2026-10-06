@@ -33,11 +33,8 @@ cat > "$ETC/radio-portal.env" <<EOF
 PORT=$PORT
 PI_IP=$PI_IP
 RADIO_IPS="$RADIO_IPS"
-MITSCHNITT=${MITSCHNITT:-nein}
-TESTMENUE=${TESTMENUE:-nein}
 UMLAUTE=${UMLAUTE:-umschreiben}
 PORTAL_URL=${PORTAL_URL:-}
-AIRABLE_AUSBLENDEN="${AIRABLE_AUSBLENDEN:-}"
 EOF
 chmod 644 "$ETC/radio-portal.env"
 

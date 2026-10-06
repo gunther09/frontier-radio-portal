@@ -1,12 +1,11 @@
 """Weboberflaeche (erfundene Beispiele, radio-browser und Stream-Pruefung sind Attrappen)."""
 
 import tempfile
-import time
 import unittest
 import urllib.parse
 from pathlib import Path
 
-from radioportal import config, radio, web
+from radioportal import config, web
 from radioportal.probe import Result
 from radioportal.radiobrowser import RadioBrowser
 from radioportal.server import Portal
@@ -57,32 +56,50 @@ class WebBase(unittest.TestCase):
         self.assertEqual(res.status, 303)
         return dict(res.headers)["Location"]
 
+    def meldung(self, res):
+        return urllib.parse.unquote_plus(self.location(res))
+
 
 class PageTests(WebBase):
-    def test_alle_seiten_rendern(self):
-        sid = self.portal.library.add_sender(name='Böse <script>alert(1)</script>', url="http://x/1", codec="MP3")
-        self.portal.library.fav_add(sid)
-        self.portal.store.note_seen("1234567890123456", name="ALEX <i>Berlin</i>")
-        for p in ("/", "/suche", "/neu", "/sender", "/tasten"):
-            res = self.get(p)
+    def test_alle_seiten_rendern_und_maskieren(self):
+        lib = self.portal.library
+        sid = lib.add_sender(name='Böse <script>alert(1)</script>', url="http://x/1", codec="MP3")
+        lib.zeigen(sid)
+        weg = lib.add_sender(name="Weg <i>x</i>", url="http://x/2")
+        self.portal.anfragen.add("192.168.1.26", "Sender nachschlagen", 200, "Portal", sid)
+        for p, q in (("/", ""), ("/", "q=rock"), ("/sender/bearbeiten", f"id={weg}"), ("/sender/adresse", ""),
+                     ("/podcasts", "")):
+            res = self.get(p, q)
             self.assertEqual(res.status, 200, p)
             body = self.text(res)
             self.assertNotIn("<script>alert", body, f"{p}: Name nicht maskiert")
-            self.assertNotIn("<i>Berlin", body)
-        self.assertIn("&lt;script&gt;", self.text(self.get("/")))
-        self.assertEqual(self.get("/gibts-nicht").status, 404)
+            self.assertNotIn("<i>x</i>", body)
+        body = self.text(self.get("/"))
+        self.assertIn("&lt;script&gt;", body)
+        self.assertIn("Ausgeblendet", body)
+        self.assertIn("Letzte Anfragen", body)
+        for alt in ("/suche", "/neu", "/tasten", "/sender", "/gibts-nicht"):
+            self.assertEqual(self.get(alt).status, 404, alt)
         self.assertEqual(self.get("/healthz").body, b"ok")
+        self.assertEqual(self.get("/sender/bearbeiten", "id=42").status, 303)
 
-    def test_suche(self):
-        body = self.text(self.get("/suche", "q=rock"))
+    def test_suche_zeigt_was_schon_da_ist(self):
+        body = self.text(self.get("/", "q=rock"))
         self.assertIn("Rock &lt;b&gt;FM&lt;/b&gt;", body)
         self.assertLess(body.index("Rock &lt;b&gt;FM"), body.index("Jazz Radio"), "http zuerst")
-        self.assertIn("★ Favorit", body)
+        self.assertEqual(body.count("Hinzufügen</button>"), 2)
+        self.post("/sender/hinzufuegen", uuid="u1")
+        body = self.text(self.get("/", "q=rock"))
+        self.assertIn("steht in der Liste", body)
+        self.post("/sender/ausblenden", id="1000001")
+        self.assertIn("Wieder einblenden", self.text(self.get("/", "q=rock")))
 
 
 class StatusTests(WebBase):
     def test_ohne_radio(self):
-        self.assertIn("Noch kein Radio", self.text(self.get("/")))
+        body = self.text(self.get("/"))
+        self.assertIn("Noch kein Radio", body)
+        self.assertIn("DNS 1 und DNS 2", body)
 
     def test_radio_gemeldet_und_persistent(self):
         self.portal.radios.touch("192.168.1.26")
@@ -95,12 +112,12 @@ class StatusTests(WebBase):
         neu = RadioStatus(Path(self.tmp.name) / "radio.json")  # beim ersten Mal sofort gespeichert
         self.assertEqual(neu.snapshot()["192.168.1.26"]["anfragen"], 1)
 
-    def test_lange_stille_wird_gewarnt(self):
+    def test_lange_stille_wird_erklaert(self):
         self.portal.radios.touch("192.168.1.26")
         self.portal.radios._data["192.168.1.26"]["zuletzt"] = "2026-01-01T10:00:00+01:00"
         body = self.text(self.get("/"))
         self.assertIn("vor ", body)
-        self.assertIn("FRITZ!Box", body)
+        self.assertIn("DNS 1 und DNS 2", body)
 
 
 class SucheTests(unittest.TestCase):
@@ -124,85 +141,91 @@ class SucheTests(unittest.TestCase):
 class ActionTests(WebBase):
     def test_post_braucht_passenden_origin(self):
         for headers in ({"Host": "raspi:8095"}, {"Host": "raspi:8095", "Origin": "http://boese.example"}):
-            res = web.handle(self.portal, "POST", "/favorit/weg", "", headers, b"id=1")
+            res = web.handle(self.portal, "POST", "/sender/ausblenden", "", headers, b"id=1")
             self.assertEqual(res.status, 403)
 
-    def test_suchtreffer_als_favorit_uebernehmen(self):
-        res = self.post("/favorit/uebernehmen", uuid="u1")
-        self.assertTrue(self.location(res).startswith("/?m="))
+    def test_suchtreffer_hinzufuegen(self):
+        res = self.post("/sender/hinzufuegen", uuid="u1")
+        self.assertIn("Platz 1", self.meldung(res))
         lib = self.portal.library
-        (sid,) = lib.favorites()
+        (sid,) = lib.liste()
         s = lib.sender(sid)
         self.assertEqual((s["name"], s["url"], s["quelle"], s["rb_uuid"]), ("Rock <b>FM</b>", "http://rock.example/live",
                                                                          "radio-browser", "u1"))
         self.assertEqual(sid, "1000001")
-        # zweites Mal: kein Duplikat
-        self.post("/favorit/uebernehmen", uuid="u1")
+        self.assertIn("schon in der Liste", self.meldung(self.post("/sender/hinzufuegen", uuid="u1")))
         self.assertEqual(len(lib.all_senders()), 1)
         self.assertIn("Rock", self.text(self.get("/")))
 
     def test_unerreichbarer_sender_wird_nicht_uebernommen(self):
         STATIONS["u3"] = dict(STATIONS["u1"], stationuuid="u3", url_resolved="http://kaputt.example/x")
         self.addCleanup(STATIONS.pop, "u3")
-        res = self.post("/favorit/uebernehmen", uuid="u3")
-        self.assertIn("/suche?m=", self.location(res))
+        self.assertIn("nicht übernommen", self.meldung(self.post("/sender/hinzufuegen", uuid="u3")))
         self.assertEqual(self.portal.library.all_senders(), {})
 
-    def test_reihenfolge_aendern_und_entfernen(self):
+    def test_reihenfolge_ausblenden_einblenden_loeschen(self):
         for u in ("u1", "u2"):
-            self.post("/favorit/uebernehmen", uuid=u)
-        a, b = self.portal.library.favorites()
-        self.post("/favorit/hoch", id=b)
-        self.assertEqual(self.portal.library.favorites(), [b, a])
-        self.post("/favorit/runter", id=b)
-        self.assertEqual(self.portal.library.favorites(), [a, b])
-        self.post("/favorit/weg", id=a)
-        self.assertEqual(self.portal.library.favorites(), [b])
-        # a ist jetzt kein Favorit mehr und darf entfernt werden, b nicht
-        self.post("/sender/entfernen", id=b)
-        self.assertIsNotNone(self.portal.library.sender(b))
-        self.post("/sender/entfernen", id=a)
-        self.assertIsNone(self.portal.library.sender(a))
+            self.post("/sender/hinzufuegen", uuid=u)
+        lib = self.portal.library
+        a, b = lib.liste()
+        self.post("/sender/hoch", id=b)
+        self.assertEqual(lib.liste(), [b, a])
+        self.post("/sender/runter", id=b)
+        self.assertEqual(lib.liste(), [a, b])
+        self.post("/sender/ausblenden", id=a)
+        self.assertEqual(lib.liste(), [b])
+        lib.note_radio(b)
+        self.post("/sender/ausblenden", id=b)
+        self.assertIn("Nicht gelöscht", self.meldung(self.post("/sender/loeschen", id=b)))
+        self.assertIsNotNone(lib.sender(b))
+        self.assertIn("gelöscht", self.meldung(self.post("/sender/loeschen", id=a)))
+        self.assertIsNone(lib.sender(a))
+        self.post("/sender/einblenden", id=b)
+        self.assertEqual(lib.liste(), [b])
 
     def test_sender_per_adresse(self):
-        res = self.post("/neu", name="Mein Sender", url="http://eigen.example/stream")
-        body = self.text(res)
-        self.assertIn("Speichern und als Favorit", body)
-        res = self.post("/neu/speichern", name="Mein Sender", start="http://eigen.example/stream",
+        body = self.text(self.post("/sender/adresse", name="Mein Sender", url="http://eigen.example/stream"))
+        self.assertIn("Zur Liste hinzufügen", body)
+        res = self.post("/sender/adresse/speichern", name="Mein Sender", start="http://eigen.example/stream",
                         orig="http://eigen.example/stream", codec="MP3", bitrate="128", hinweis="ok")
         self.assertEqual(self.location(res).split("?")[0], "/")
-        (sid,) = self.portal.library.favorites()
+        (sid,) = self.portal.library.liste()
         self.assertEqual(self.portal.library.sender(sid)["quelle"], "manuell")
-        # kaputte Adresse: kein Speichern-Knopf
-        self.assertNotIn("Speichern und als Favorit", self.text(self.post("/neu", name="x", url="http://kaputt.example/")))
+        self.assertNotIn("Zur Liste hinzufügen", self.text(self.post("/sender/adresse", name="x",
+                                                                      url="http://kaputt.example/")))
 
-    def test_taste_mit_ersatz(self):
-        aid = "1234567890123456"
-        self.portal.store.note_seen(aid, name="Alter Sender")
-        self.portal.store.note_play(aid, "http://airable.example/s")
-        # Ersatz per Vorschlag
-        self.assertIn("Rock", self.text(self.get("/tasten/vorschlag", f"id={aid}")))
-        res = self.post("/tasten/uebernehmen", aid=aid, uuid="u1")
-        self.assertEqual(self.location(res).split("?")[0], "/tasten")
-        ersatz = self.portal.store.ersatz_of(aid)
-        self.assertEqual(self.portal.library.sender(ersatz)["name"], "Rock <b>FM</b>")
-        self.assertEqual(radio.lookup(self.portal, aid)["id"], ersatz)
-        self.assertEqual(self.portal.library.favorites(), [], "Ersatz ist nicht automatisch Favorit")
-        # Ersatz geschuetzt, dann entfernen
-        self.post("/sender/entfernen", id=ersatz)
-        self.assertIsNotNone(self.portal.library.sender(ersatz))
-        self.post("/tasten/ersatz", aid=aid, sid="")
-        self.assertEqual(self.portal.store.ersatz_of(aid), "")
-        # vorhandenen Sender als Ersatz waehlen
-        self.post("/tasten/ersatz", aid=aid, sid=ersatz)
-        self.assertEqual(self.portal.store.ersatz_of(aid), ersatz)
+    def test_bearbeiten_name_und_adresse_id_bleibt(self):
+        self.post("/sender/hinzufuegen", uuid="u1")
+        lib = self.portal.library
+        (sid,) = lib.liste()
+        self.post("/sender/bearbeiten", id=sid, name="Rock FM", url="http://rock.example/live")
+        self.assertEqual(lib.sender(sid)["name"], "Rock FM")
+        # kaputte neue Adresse: nichts gespeichert, Fehler auf der Seite
+        res = self.post("/sender/bearbeiten", id=sid, name="Anders", url="http://kaputt.example/x")
+        self.assertEqual(res.status, 200)
+        self.assertIn("Nicht gespeichert", self.text(res))
+        self.assertEqual((lib.sender(sid)["name"], lib.sender(sid)["url"]), ("Rock FM", "http://rock.example/live"))
+        # neue Adresse: geprueft, gleiche Nummer
+        self.post("/sender/bearbeiten", id=sid, name="Rock FM", url="http://neu.example/rock")
+        self.assertEqual(lib.sender(sid)["url"], "http://neu.example/rock")
+        self.assertEqual(lib.liste(), [sid])
+        res = self.post("/sender/bearbeiten", id=sid, name="", url="http://neu.example/rock")
+        self.assertIn("nicht leer", self.text(res))
 
-    def test_ersatz_fuer_unbekannte_ids(self):
-        self.post("/tasten/ersatz", aid="999", sid="1000001")
-        self.assertEqual(self.portal.store.ersatz_of("999"), "")
-        res = self.post("/tasten/uebernehmen", aid="999", uuid="u1")
-        self.assertIn("Unbekannte", urllib.parse.unquote(self.location(res)))
-        self.assertEqual(self.portal.library.all_senders(), {})
+    def test_pruefen(self):
+        self.post("/sender/hinzufuegen", uuid="u1")
+        res = self.post("/sender/pruefen", id="1000001")
+        self.assertTrue(self.location(res).startswith("/sender/bearbeiten?id=1000001&m="))
+
+    def test_sicherung(self):
+        self.post("/sender/hinzufuegen", uuid="u1")
+        import json
+        res = self.get("/sicherung.json")
+        self.assertIn("attachment", dict(res.headers)["Content-Disposition"])
+        data = json.loads(res.body.decode("utf-8"))
+        self.assertEqual(data["senderliste"], ["1000001"])
+        self.assertEqual(data["sender"]["1000001"]["rb_uuid"], "u1")
+        self.assertNotIn("airable", data)
 
 
 if __name__ == "__main__":

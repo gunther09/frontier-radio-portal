@@ -35,8 +35,7 @@ def main() -> int:
     threading.Thread(target=_refresher, args=(srv.portal, stop), daemon=True).start()
     # systemd beendet mit SIGTERM: sauber herunterfahren statt mitten im Schreiben sterben.
     signal.signal(signal.SIGTERM, lambda *_: threading.Thread(target=srv.shutdown).start())
-    logging.info("radio-portal %s lauscht auf %s:%d, Daten in %s, Mitschnitt %s", __version__,
-                 cfg.host, cfg.port, cfg.data_dir, "an" if cfg.mitschnitt else "aus")
+    logging.info("radio-portal %s lauscht auf %s:%d, Daten in %s", __version__, cfg.host, cfg.port, cfg.data_dir)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

@@ -1,7 +1,8 @@
-"""Ablage der erfassten Airable-Sender als JSON (atomar geschrieben, hinter einem Lock)."""
+"""Kleine Ablagen: JSON atomar schreiben, Statusanzeige der Radios, Anfrage-Protokoll."""
 
 from __future__ import annotations
 
+import collections
 import copy
 import datetime
 import json
@@ -25,85 +26,6 @@ def write_json_atomic(path: Path, data) -> None:
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, path)
-
-
-class AirableStore:
-    """`airable.json`: {airable_id: {name, format, ort, bitrate, airable_url, ersatz_id,
-    zuerst, zuletzt, gespielt}}. `ersatz_id` bleibt leer, bis ein Ersatz-Sender gewaehlt ist."""
-
-    def __init__(self, path: Path):
-        self.path = Path(path)
-        self._lock = threading.Lock()
-        self._data: dict[str, dict] = {}
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._load()
-
-    def _load(self) -> None:
-        try:
-            with open(self.path, encoding="utf-8") as f:
-                data = json.load(f)
-            if not isinstance(data, dict):
-                raise ValueError("kein Objekt")
-            self._data = data
-        except FileNotFoundError:
-            pass
-        except (OSError, ValueError) as e:
-            kaputt = self.path.with_name(self.path.name + ".kaputt")
-            log.error("%s unlesbar (%s), liegt jetzt als %s", self.path, e, kaputt)
-            try:
-                os.replace(self.path, kaputt)
-            except OSError:
-                pass
-
-    def _eintrag(self, station_id: str) -> dict:
-        eintrag = self._data.get(station_id)
-        if eintrag is None:
-            eintrag = {"name": "", "format": "", "ort": "", "bitrate": "", "airable_url": "",
-                       "ersatz_id": "", "zuerst": jetzt(), "zuletzt": "", "gespielt": 0}
-            self._data[station_id] = eintrag
-        return eintrag
-
-    def note_seen(self, station_id: str, name: str = "", format: str = "", ort: str = "",
-                  bitrate: str = "") -> None:
-        """Das Radio hat die ID nachgeschlagen (FAV-Liste, Stationstaste, letzter Sender)."""
-        with self._lock:
-            e = self._eintrag(station_id)
-            for key, wert in (("name", name), ("format", format), ("ort", ort), ("bitrate", bitrate)):
-                if wert:
-                    e[key] = wert
-            e["zuletzt"] = jetzt()
-            write_json_atomic(self.path, self._data)
-
-    def note_play(self, station_id: str, url: str) -> None:
-        """Das Radio hat die Stream-Adresse zur ID geholt."""
-        with self._lock:
-            e = self._eintrag(station_id)
-            e["airable_url"] = url
-            e["gespielt"] = int(e.get("gespielt", 0)) + 1
-            e["zuletzt"] = jetzt()
-            write_json_atomic(self.path, self._data)
-
-    def set_ersatz(self, airable_id: str, sender_id: str | None) -> bool:
-        """Legt fest, welcher eigene Sender die Airable-ID ersetzt (None: Ersatz entfernen)."""
-        with self._lock:
-            e = self._data.get(airable_id)
-            if e is None:
-                return False
-            e["ersatz_id"] = sender_id or ""
-            write_json_atomic(self.path, self._data)
-            return True
-
-    def ersatz_of(self, airable_id: str) -> str:
-        with self._lock:
-            return (self._data.get(airable_id) or {}).get("ersatz_id", "")
-
-    def ersatz_ids(self) -> set[str]:
-        with self._lock:
-            return {e["ersatz_id"] for e in self._data.values() if e.get("ersatz_id")}
-
-    def snapshot(self) -> dict[str, dict]:
-        with self._lock:
-            return copy.deepcopy(self._data)
 
 
 class RadioStatus:
@@ -144,3 +66,23 @@ class RadioStatus:
     def snapshot(self) -> dict[str, dict]:
         with self._lock:
             return copy.deepcopy(self._data)
+
+
+class RadioLog:
+    """Die letzten Anfragen der Radios, nur im Speicher (nach einem Neustart leer).
+
+    Fuer die Fehlersuche auf der Startseite: Laeuft das Radio ueber uns, was fragt es, was
+    antworten wir? Ohne die Kennung des Radios (`mac`) und ohne Query-Parameter."""
+
+    def __init__(self, maximum: int = 200):
+        self._lock = threading.Lock()
+        self._items: collections.deque = collections.deque(maxlen=maximum)
+
+    def add(self, ip: str, was: str, status: int, weg: str, sid: str = "") -> None:
+        with self._lock:
+            self._items.append({"zeit": jetzt(), "ip": ip, "was": was, "status": status, "weg": weg, "id": sid})
+
+    def snapshot(self) -> list[dict]:
+        """Neueste zuerst."""
+        with self._lock:
+            return [dict(e) for e in reversed(self._items)]

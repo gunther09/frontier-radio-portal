@@ -8,7 +8,6 @@ from pathlib import Path
 from unittest import mock
 
 from radioportal import config, podcasts, radio, web
-from radioportal.airable import Upstream, UpstreamError
 from radioportal.podcasts import PodcastError, PodcastStore, episode_id, parse_feed
 from radioportal.server import Portal
 from radioportal.stream import Probe
@@ -144,13 +143,13 @@ class RadioPodcastTests(unittest.TestCase):
         root = ET.fromstring(reply.body)
         return [{c.tag: (c.text or "") for c in it} for it in root.iter("Item")]
 
-    def test_hauptmenue_zeigt_podcasts_erst_wenn_vorhanden(self):
-        self.portal.forwarder.forward.side_effect = UpstreamError("aus")
-        titles = [i.get("Title") for i in self.items(self.call("/vtuner", ""))]
-        self.assertEqual(titles, ["Favoriten", "Eigene Podcasts"])
+    def test_senderliste_zeigt_podcasts_erst_wenn_vorhanden(self):
+        types = [(i["ItemType"], i.get("Title")) for i in self.items(self.call("/vtuner", ""))]
+        self.assertEqual(types, [("Dir", "Podcasts")])
         self.portal.podcasts.remove(self.pid)
-        titles = [i.get("Title") for i in self.items(self.call("/vtuner", ""))]
-        self.assertEqual(titles, ["Favoriten"])
+        types = [i["ItemType"] for i in self.items(self.call("/vtuner", ""))]
+        self.assertEqual(types, ["Display"], "ohne Sender und Podcasts nur der Hinweis")
+        self.portal.forwarder.forward.assert_not_called()
 
     def test_podcastliste_und_folgen(self):
         it = self.items(self.call("/portal/podcasts"))
@@ -197,41 +196,6 @@ class RadioPodcastTests(unittest.TestCase):
         self.assertEqual(dict(self.call(f"/portal/episode/{eid}").headers)["Location"], "http://cdn.example/1.mp3")
 
 
-class AirablePauseTests(unittest.TestCase):
-    def test_nach_zwei_fehlern_wird_airable_pausiert(self):
-        with tempfile.TemporaryDirectory() as d:
-            portal = Portal(config.Config(data_dir=Path(d)), mock.Mock())
-            portal.forwarder.forward.side_effect = UpstreamError("aus")
-            call = lambda: radio.handle(portal, "aldi.wifiradiofrontier.com", "GET", "/vtuner", "", [])  # noqa: E731
-            call()
-            self.assertEqual(portal.airable_pause_until, 0, "ein Aussetzer sperrt noch nicht")
-            call()
-            call()
-            self.assertEqual(portal.forwarder.forward.call_count, 2, "nach dem zweiten Fehler wird nicht mehr gefragt")
-            portal.airable_pause_until = 0  # Pause abgelaufen: wieder versuchen
-            call()
-            self.assertEqual(portal.forwarder.forward.call_count, 3)
-
-    def test_erfolg_setzt_zaehler_zurueck(self):
-        with tempfile.TemporaryDirectory() as d:
-            portal = Portal(config.Config(data_dir=Path(d)), mock.Mock())
-            ok = Upstream(200, "OK", [], b"<ListOfItems><Item><ItemType>Dir</ItemType><Title>Sender</Title><UrlDir>http://x/?</UrlDir></Item></ListOfItems>")
-            portal.forwarder.forward.side_effect = [UpstreamError("aus"), ok, UpstreamError("aus")]
-            for _ in range(3):
-                radio.handle(portal, "aldi.wifiradiofrontier.com", "GET", "/vtuner", "", [])
-            self.assertEqual(portal.airable_pause_until, 0, "Fehler, Erfolg, Fehler: nie zwei in Folge")
-
-    def test_leeres_menue_zaehlt_als_ausfall(self):
-        with tempfile.TemporaryDirectory() as d:
-            portal = Portal(config.Config(data_dir=Path(d)), mock.Mock())
-            portal.forwarder.forward.return_value = Upstream(200, "OK", [], b"<ListOfItems/>")
-            titles = [i.get("Title") for i in
-                      ET.fromstring(radio.handle(portal, "aldi.wifiradiofrontier.com", "GET", "/vtuner", "", []).body).iter("Item")
-                      for i in [{c.tag: c.text for c in i}]]
-            self.assertEqual(titles, ["Favoriten"])
-            self.assertEqual(portal.airable_failures, 1)
-
-
 class SucheUndSicherungTests(unittest.TestCase):
     ITUNES = {"resultCount": 3, "results": [
         {"collectionName": "Logbuch <Netzpolitik>", "artistName": "Tim", "feedUrl": "https://feed.example/lnp",
@@ -261,19 +225,12 @@ class SucheUndSicherungTests(unittest.TestCase):
         with self.assertRaises(PodcastError):
             podcasts.search_podcasts("x", kaputt)
 
-    def test_sicherung(self):
-        sid = self.portal.library.add_sender(name="Mein Sender", url="http://x/1")
-        self.portal.library.fav_add(sid)
-        self.portal.store.note_seen("1234567890123456", name="Alt")
-        self.portal.store.set_ersatz("1234567890123456", sid)
+    def test_sicherung_enthaelt_podcasts(self):
+        self.portal.podcasts.add("http://feed.example/rss", parse_feed(FEED.encode()))
         res = web.handle(self.portal, "GET", "/sicherung.json", "", {"Host": "raspi:8095"})
-        self.assertEqual(res.status, 200)
-        self.assertIn("attachment", dict(res.headers)["Content-Disposition"])
         import json
         data = json.loads(res.body.decode("utf-8"))
-        self.assertEqual(data["favoriten"], [sid])
-        self.assertEqual(data["airable"]["1234567890123456"]["ersatz_id"], sid)
-        self.assertEqual(data["sender"][sid]["name"], "Mein Sender")
+        self.assertEqual(data["podcasts"]["5000001"]["feed"], "http://feed.example/rss")
 
 
 class WebPodcastTests(unittest.TestCase):

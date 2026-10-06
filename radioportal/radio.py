@@ -1,4 +1,7 @@
-"""Eigene Antworten fuer das Radio (Hauptmenue, Favoriten, Nachschlagen, Abspielen)."""
+"""Eigene Antworten fuer das Radio: Senderliste, Podcasts, Nachschlagen, Abspielen.
+
+Das Menue *Internet Radio* zeigt die Sender der Weboberflaeche direkt, darunter *Podcasts*.
+Airable kommt im Menue nicht vor; nur was das Portal nicht kennt, wird noch durchgereicht."""
 
 from __future__ import annotations
 
@@ -7,23 +10,17 @@ import logging
 import re
 import time
 import urllib.parse
-import xml.etree.ElementTree as ET
 from typing import NamedTuple
 
 from . import probe as probe_mod
-from . import testmenue
-from .airable import UpstreamError, klartext
 from .stream import StreamError
-from .xmlitems import Xml, page
+from .xmlitems import page
 
 log = logging.getLogger(__name__)
 
 TOKEN = b"<EncryptedToken>3a3f5ac48a1dab4e</EncryptedToken>"
 HTML = "text/html; charset=UTF-8"
 PLAY_CACHE_SECONDS = 30
-PLATZ_ERSTE = 3000001  # "Favorit 1" ... "Favorit N": Platz k spielt immer den k-ten Favoriten der Weboberflaeche
-PLAETZE = 10
-AIRABLE_PAUSE = 300  # nach einem Ausfall fragen wir Airable 5 Minuten nicht mehr (kein 4-s-Warten je Menue)
 
 
 class Reply(NamedTuple):
@@ -42,82 +39,15 @@ def _range(qs: dict) -> tuple[int, int]:
     return num("startItems", 1), num("endItems", 100)
 
 
-def platz_nr(sid: str) -> int:
-    """1..PLAETZE, wenn `sid` eine Platz-ID ist, sonst 0."""
-    if sid.isdigit() and PLATZ_ERSTE <= int(sid) < PLATZ_ERSTE + PLAETZE:
-        return int(sid) - PLATZ_ERSTE + 1
-    return 0
-
-
-def platz_sender(portal, nr: int) -> dict | None:
-    favs = portal.library.favorites()
-    return portal.library.sender(favs[nr - 1]) if 0 < nr <= len(favs) else None
-
-
-def lookup(portal, sid: str) -> dict | None:
-    """Eigener Sender, Platz (k-ter Favorit), Sender-Ersatz einer Airable-ID oder Testsender."""
-    s = portal.library.sender(sid)
-    if s:
-        return s
-    if platz_nr(sid):
-        return platz_sender(portal, platz_nr(sid))
-    ersatz = portal.store.ersatz_of(sid)
-    if ersatz:
-        s = lookup(portal, ersatz) if platz_nr(ersatz) else portal.library.sender(ersatz)
-        if s:
-            return s
-    if portal.cfg.testmenue:
-        return testmenue.sender(sid)
-    return None
-
-
-def _station(portal, host: str, shown_id: str, s: dict, name: str = "", desc: str = "") -> str:
-    """Bookmark: Das Radio ruft ihn, wenn man den Sender dort zu den Favoriten hinzufuegt/entfernt
-    (nur fuer eigene Sender, nicht fuer Plaetze und Ersatz)."""
-    bm = ""
-    if portal.library.sender(shown_id):
-        aktion = "pop" if shown_id in portal.library.favorites() else "push"
-        bm = f"http://{host}/vtuner/collection/{aktion}/station={shown_id}?"
-    return portal.xml.station(shown_id, name or s["name"], f"http://{host}/portal/play/{shown_id}", desc=desc,
-                              fmt=s.get("genre", ""), location=s.get("land", ""), bandwidth=s.get("bitrate", ""),
-                              bookmark=bm)
-
-
-def plaetze(portal, host: str) -> Reply:
-    """Feste Eintraege "Favorit 1..N" zum Speichern in der FAV-Liste des Radios. Die Beschriftung
-    bleibt immer gleich, was spielt, bestimmt die Weboberflaeche (Reihenfolge der Favoriten)."""
-    x = portal.xml
-    items = []
-    for nr in range(1, PLAETZE + 1):
-        sid = str(PLATZ_ERSTE + nr - 1)
-        s = platz_sender(portal, nr)
-        desc = ("Spielt jetzt: " + s["name"]) if s else "Noch leer (Favoriten im Browser pflegen)"
-        items.append(x.station(sid, f"Favorit {nr}", f"http://{host}/portal/play/{sid}", desc=desc))
-    return Reply(200, HTML, x.listing(items, previous=f"http://{host}/portal/favoriten?"))
-
-
-def collection_aendern(portal, host: str, aktion: str, sid: str) -> Reply:
-    """`/vtuner/collection/push|pop/station=ID`: Favorit am Radio hinzufuegen/entfernen."""
-    lib = portal.library
-    if not lib.sender(sid):
-        ers = portal.store.ersatz_of(sid)
-        sid = ers if ers and lib.sender(ers) else sid
-    if aktion == "push":
-        lib.fav_add(sid)
-        text = "Zu den Favoriten hinzugefuegt"
-    else:
-        lib.fav_remove(sid)
-        text = "Aus den Favoriten entfernt"
-    log.info("Radio: %s station=%s", aktion, sid)
-    return Reply(200, HTML, portal.xml.listing([portal.xml.display(text)], previous=f"http://{host}/vtuner?"))
+def _station(portal, host: str, sid: str, s: dict) -> str:
+    return portal.xml.station(sid, s["name"], f"http://{host}/portal/play/{sid}", fmt=s.get("genre", ""),
+                              location=s.get("land", ""), bandwidth=s.get("bitrate", ""))
 
 
 def play_target(portal, host: str, s: dict) -> str:
     """Adresse, die das Radio abspielt. Weiterleitungen und Playlists loesen wir jetzt auf
     (Sitzungskennungen verfallen, das Radio folgt hoechstens einer Weiterleitung). https
     geht ueber /portal/live/<id>."""
-    if s.get("raw"):
-        return f"http://{host}/portal/umleitung/{s['id']}"
     now = time.monotonic()
     hit = portal.play_cache.get(s["url"])
     if hit and now - hit[0] < PLAY_CACHE_SECONDS:
@@ -132,77 +62,23 @@ def play_target(portal, host: str, s: dict) -> str:
     return final
 
 
-def airable_menue(portal, host: str, target: str, headers) -> list[tuple[str, str]]:
-    """Die `Dir`-Eintraege aus Airables Hauptmenue (Titel, URL), oder [] wenn Airable nicht antwortet."""
-    if time.monotonic() < portal.airable_pause_until:
-        return []
-    try:
-        up = portal.forwarder.forward("GET", host, target, headers, b"", timeout=4.0)
-        if up.status != 200:
-            raise UpstreamError(f"Antwort {up.status}")
-        root = ET.fromstring(klartext(up.headers, up.body))
-        out = []
-        for it in root.iter("Item"):
-            if (it.findtext("ItemType") or "").strip() != "Dir":
-                continue
-            title, url = (it.findtext("Title") or "").strip(), (it.findtext("UrlDir") or "").strip()
-            if title and url:
-                out.append((title, url))
-        if not out:
-            raise UpstreamError("keine Menue-Eintraege")
-        portal.airable_failures = 0
-        return out
-    except (UpstreamError, ET.ParseError) as e:
-        # Ein einzelner Aussetzer sperrt Airable nicht; erst der zweite Fehler in Folge.
-        portal.airable_failures += 1
-        if portal.airable_failures >= 2:
-            portal.airable_pause_until = time.monotonic() + AIRABLE_PAUSE
-        log.warning("Hauptmenue: Airable nicht nutzbar (%s)%s", e,
-                    f", {AIRABLE_PAUSE // 60} Min. nur eigene Eintraege" if portal.airable_failures >= 2 else "")
-        return []
-
-
-def hauptmenue(portal, host: str, target: str, headers) -> Reply:
-    """Unsere Eintraege oben, darunter die Airable-Menues (solange es sie gibt)."""
-    x = portal.xml
-    items = [x.dir("Favoriten", f"http://{host}/portal/favoriten?")]
-    if portal.podcasts.all():
-        items.append(x.dir("Eigene Podcasts", f"http://{host}/portal/podcasts?"))
-    for title, url in airable_menue(portal, host, target, headers):
-        if any(teil in urllib.parse.urlsplit(url).path for teil in portal.cfg.airable_ausblenden):
-            continue
-        items.append(x.dir("Airable-Favoriten" if title == "Meine Favoriten" else title, url))
-    if portal.cfg.testmenue:
-        items.append(x.dir("Test", f"http://{host}/portal/test?"))
-    return Reply(200, HTML, x.listing(items))
-
-
-def favoriten(portal, host: str, qs: dict) -> Reply:
+def senderliste(portal, host: str, qs: dict) -> Reply:
+    """Hauptmenue: die Sender in der Reihenfolge der Weboberflaeche, darunter *Podcasts*."""
     x = portal.xml
     entries = []
-    for sid in portal.library.favorites():
+    for sid in portal.library.liste():
         s = portal.library.sender(sid)
         if s:
             entries.append(_station(portal, host, sid, s))
-    start, end = _range(qs)
-    if entries:
-        entries.append(x.dir("Favorit-Plaetze (FAV-Taste)", f"http://{host}/portal/plaetze?"))
+    if portal.podcasts.all():
+        entries.append(x.dir("Podcasts", f"http://{host}/portal/podcasts?"))
     if not entries:
-        shown = [x.display("Noch keine Favoriten")]
+        shown = [x.display("Noch keine Sender")]
         if portal.cfg.portal_url:
             shown.append(x.display("Im Browser: " + portal.cfg.portal_url))
-        return Reply(200, HTML, x.listing(shown, count=len(shown), previous=f"http://{host}/vtuner?"))
-    return Reply(200, HTML, x.listing(page(entries, start, end), count=len(entries),
-                                      previous=f"http://{host}/vtuner?"))
-
-
-def testmenue_liste(portal, host: str) -> Reply:
-    x = portal.xml
-    xu = Xml("utf8")
-    items = [xu.display(testmenue.UMLAUT_ZEILEN[0]), x.display(testmenue.UMLAUT_ZEILEN[1])]
-    for sid in testmenue.TEST_SENDER:
-        items.append(_station(portal, host, sid, testmenue.sender(sid)))
-    return Reply(200, HTML, x.listing(items, previous=f"http://{host}/vtuner?"))
+        return Reply(200, HTML, x.listing(shown))
+    start, end = _range(qs)
+    return Reply(200, HTML, x.listing(page(entries, start, end), count=len(entries)))
 
 
 def episode_location(portal, host: str, loc: str) -> str | None:
@@ -218,13 +94,8 @@ def episode_location(portal, host: str, loc: str) -> str | None:
         log.warning("Folge: Ziel antwortet %d", probe.status)
         return None
     if probe.needs_relay:
-        new = f"http://{host}/portal/stream/{portal.relay_ids.add(probe.final_url)}.mp3"
-    else:
-        new = probe.final_url
-    if portal.cfg.mitschnitt:
-        log.info("Folge: %s -> %s (%s)", "Relay" if probe.needs_relay else "direkt", new.split("?", 1)[0][:100],
-                 probe.content_type)
-    return new
+        return f"http://{host}/portal/stream/{portal.relay_ids.add(probe.final_url)}.mp3"
+    return probe.final_url
 
 
 def podcast_liste(portal, host: str) -> Reply:
@@ -276,60 +147,71 @@ def episode_abspielen(portal, host: str, eid: str) -> Reply:
     return Reply(302, HTML, b"", (("Location", new),))
 
 
+def beschreibe(path: str, query: str) -> tuple[str, str]:
+    """Kurzbeschreibung einer Radio-Anfrage fuer das Anfrage-Protokoll: (Text, ID oder "")."""
+    low = path.lower()
+    qs = urllib.parse.parse_qs(query)
+    if low.endswith("/loginxml.asp"):
+        return ("Anmeldung", "") if "token" in qs else ("Senderliste", "")
+    if path.rstrip("/") in ("/vtuner", "/portal/favoriten"):
+        return "Senderliste", ""
+    if low.endswith("/search.asp"):
+        sid = (qs.get("Search") or [""])[0][:40]
+        return ("Folge nachschlagen" if qs.get("sSearchtype") == ["5"] else "Sender nachschlagen"), sid
+    if low.endswith("/findupdate.aspx"):
+        return "Update-Prüfung", ""
+    for prefix, text in (("/portal/play/", "Sender abspielen"), ("/portal/live/", "Sender über den Server"),
+                         ("/portal/podcast/", "Podcast öffnen"), ("/portal/episode/", "Folge abspielen")):
+        if path.startswith(prefix):
+            return text, path[len(prefix):].split(".")[0][:40]
+    if path.startswith("/portal/stream/"):
+        return "Folge über den Server", ""
+    if path == "/portal/podcasts":
+        return "Podcasts", ""
+    return path[:80], ""
+
+
 def handle(portal, host: str, command: str, path: str, query: str, headers) -> Reply | None:
     """None: nicht unsere Sache, an Airable durchreichen."""
     low = path.lower()
     qs = urllib.parse.parse_qs(query, keep_blank_values=True)
-    full = path + ("?" + query if query else "")
 
     if low.endswith("/loginxml.asp"):
         if "token" in qs:
             return Reply(200, "text/html;charset=UTF-8", TOKEN)
         if "gofile" in qs:
-            return hauptmenue(portal, host, full, headers)
+            return senderliste(portal, host, qs)
         return None
-    if path.rstrip("/") == "/vtuner":
-        return hauptmenue(portal, host, full, headers)
+    # /vtuner ist Airables "zurueck nach oben", /portal/favoriten das Menue bis Version 0.2
+    if path.rstrip("/") in ("/vtuner", "/portal/favoriten"):
+        return senderliste(portal, host, qs)
 
     if low.endswith("/search.asp") and qs.get("sSearchtype") == ["5"] and qs.get("Search"):
         return episode_nachschlagen(portal, host, qs["Search"][0])
     if low.endswith("/search.asp") and qs.get("sSearchtype") == ["3"] and qs.get("Search"):
         sid = qs["Search"][0]
-        s = lookup(portal, sid)
+        s = portal.library.sender(sid)
         if not s:
             return None
-        if not portal.library.sender(sid) and portal.store.ersatz_of(sid):
-            portal.store.note_seen(sid)  # Taste mit Ersatz: "zuletzt" fuer die Oberflaeche fuehren
-        x = portal.xml
-        return Reply(200, HTML, x.listing([_station(portal, host, sid, s)], count=1,
-                                          previous=f"http://{host}/vtuner?"))
+        portal.library.note_radio(sid)
+        return Reply(200, HTML, portal.xml.listing([_station(portal, host, sid, s)], count=1,
+                                                   previous=f"http://{host}/vtuner?"))
 
     if path.startswith("/portal/play/"):
-        s = lookup(portal, path.rsplit("/", 1)[-1])
+        sid = path.rsplit("/", 1)[-1]
+        s = portal.library.sender(sid)
         if not s:
             return Reply(404, "text/plain; charset=utf-8", b"Unbekannt.\n")
+        portal.library.note_radio(sid)
         # Klartext ohne Zeilenende, wie Airable
         return Reply(200, "audio/x-mpegurl", play_target(portal, host, s).encode("utf-8"))
 
-    m = re.match(r"^/vtuner/collection/(push|pop)/station=(\d+)/?$", path)
-    if m:
-        return collection_aendern(portal, host, m.group(1), m.group(2))
-    if path == "/portal/plaetze":
-        return plaetze(portal, host)
-    if path == "/portal/favoriten":
-        return favoriten(portal, host, qs)
     if path == "/portal/podcasts":
         return podcast_liste(portal, host)
-    if path.startswith("/portal/podcast/"):
+    if re.match(r"^/portal/podcast/\d+$", path):
         return podcast_folgen(portal, host, path.rsplit("/", 1)[-1])
     if path.startswith("/portal/episode/"):
         return episode_abspielen(portal, host, path.rsplit("/", 1)[-1])
-    if path == "/portal/test" and portal.cfg.testmenue:
-        return testmenue_liste(portal, host)
-    if path.startswith("/portal/umleitung/") and portal.cfg.testmenue:
-        s = testmenue.TEST_SENDER.get(path.rsplit("/", 1)[-1])
-        if s and s.get("ziel"):
-            return Reply(302, "text/html; charset=UTF-8", b"", (("Location", s["ziel"]),))
     if path.startswith("/portal/"):
         return Reply(404, "text/plain; charset=utf-8", b"Unbekannt.\n")
     return None

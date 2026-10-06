@@ -1,32 +1,31 @@
 """Radio-Routen, Bibliothek, XML (erfundene Beispiele)."""
 
 import tempfile
+import time
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest import mock
 
-from radioportal import config, radio, xmlitems
-from radioportal.airable import Upstream, UpstreamError
+from radioportal import config, probe, radio, xmlitems
 from radioportal.library import Library
+from radioportal.podcasts import parse_feed
 from radioportal.server import Portal
 
-AIRABLE_MENUE = b"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<ListOfItems><ItemCount>2</ItemCount>
-<Item><ItemType>Dir</ItemType><Title>Meine Favoriten</Title><UrlDir>http://aldi.wifiradiofrontier.com/vtuner/collection=stations?</UrlDir><UrlDirBackUp>x</UrlDirBackUp></Item>
-<Item><ItemType>Dir</ItemType><Title>Podcasts</Title><UrlDir>http://aldi.wifiradiofrontier.com/vtuner/podcasts?</UrlDir><UrlDirBackUp>x</UrlDirBackUp></Item>
-</ListOfItems>"""
+FEED = b"""<?xml version="1.0"?><rss version="2.0"><channel><title>Pod</title>
+<item><title>F1</title><guid>g1</guid><enclosure url="http://cdn.example/1.mp3" type="audio/mpeg"/></item>
+</channel></rss>"""
 
 
-class FakeForwarder:
-    def __init__(self, body=AIRABLE_MENUE, error=None):
-        self.body, self.error, self.calls = body, error, []
+class KeinAirable:
+    """Die Senderliste darf Airable nie fragen."""
 
-    def forward(self, method, host, target, headers, body=b"", timeout=None):
-        self.calls.append(target)
-        if self.error:
-            raise self.error
-        return Upstream(200, "OK", [("Content-Type", "text/html")], self.body)
+    def __init__(self):
+        self.calls = []
+
+    def forward(self, *a, **kw):
+        self.calls.append(a)
+        raise AssertionError("Airable gefragt")
 
 
 def items(reply):
@@ -42,10 +41,13 @@ class Base(unittest.TestCase):
         self.mk()
 
     def mk(self, **kw):
-        self.portal = Portal(config.Config(data_dir=Path(self.tmp.name), **kw), FakeForwarder())
+        self.portal = Portal(config.Config(data_dir=Path(self.tmp.name), **kw), KeinAirable())
 
     def call(self, path, query="", host="aldi.wifiradiofrontier.com"):
         return radio.handle(self.portal, host, "GET", path, query, [])
+
+    def search(self, sid):
+        return self.call("/setupapp/aldi/asp/BrowseXML/Search.asp", f"sSearchtype=3&Search={sid}&mac=h")
 
 
 class LibraryTests(Base):
@@ -54,7 +56,7 @@ class LibraryTests(Base):
         a = lib.add_sender(name="A", url="http://a/1")
         b = lib.add_sender(name="B", url="http://b/1")
         self.assertEqual((a, b), ("1000001", "1000002"))
-        self.assertTrue(lib.remove_sender(b, set()))
+        self.assertTrue(lib.remove_sender(b))
         c = Library(Path(self.tmp.name)).add_sender(name="C", url="http://c/1")  # neu geladen
         self.assertEqual(c, "1000003")
 
@@ -64,20 +66,45 @@ class LibraryTests(Base):
         self.assertEqual(lib.add_sender(name="A2", url="http://a/other", rb_uuid="u1"), a)
         self.assertEqual(lib.add_sender(name="A3", url="http://a/1"), a)
 
-    def test_favoriten_reihenfolge_und_schutz(self):
+    def test_liste_reihenfolge_ausblenden(self):
         lib = self.portal.library
         a, b, c = (lib.add_sender(name=n, url=f"http://x/{n}") for n in "abc")
         for s in (a, b, c):
-            self.assertTrue(lib.fav_add(s))
-        self.assertFalse(lib.fav_add(a))
-        self.assertTrue(lib.fav_move(c, -1))
-        self.assertEqual(lib.favorites(), [a, c, b])
-        self.assertFalse(lib.fav_move(a, -1))
-        self.assertFalse(lib.remove_sender(a, set()), "Favorit darf nicht geloescht werden")
-        lib.fav_remove(a)
-        self.assertFalse(lib.remove_sender(a, {a}), "Taste mit Ersatz darf nicht geloescht werden")
-        self.assertTrue(lib.remove_sender(a, set()))
-        self.assertEqual(Library(Path(self.tmp.name)).favorites(), [c, b])
+            self.assertTrue(lib.zeigen(s))
+        self.assertFalse(lib.zeigen(a))
+        self.assertTrue(lib.verschieben(c, -1))
+        self.assertEqual(lib.liste(), [a, c, b])
+        self.assertFalse(lib.verschieben(a, -1))
+        self.assertTrue(lib.ausblenden(c))
+        self.assertEqual((lib.liste(), lib.ausgeblendet()), ([a, b], [c]))
+        self.assertEqual(Library(Path(self.tmp.name)).liste(), [a, b])
+
+    def test_loeschen_nur_wenn_ausgeblendet_und_nie_am_radio(self):
+        lib = self.portal.library
+        a, b = (lib.add_sender(name=n, url=f"http://x/{n}") for n in "ab")
+        lib.zeigen(a)
+        self.assertFalse(lib.remove_sender(a), "steht in der Liste")
+        lib.ausblenden(a)
+        lib.note_radio(b)  # das Radio hat b gespielt: kann auf der FAV-Taste liegen
+        self.assertFalse(lib.loeschbar(b))
+        self.assertFalse(lib.remove_sender(b))
+        self.assertTrue(lib.loeschbar(a))
+        self.assertTrue(lib.remove_sender(a))
+
+    def test_sender_aus_version_02_gelten_als_gespielt(self):
+        lib = self.portal.library
+        a = lib.add_sender(name="Alt", url="http://x/alt")
+        lib._sender[a].pop("radio_zuletzt")  # so sehen Sender aus der Zeit vor 0.3 aus
+        self.assertFalse(lib.loeschbar(a))
+
+    def test_note_radio_schreibt_nicht_jedes_mal(self):
+        lib = self.portal.library
+        a = lib.add_sender(name="A", url="http://x/a")
+        with mock.patch.object(lib, "_save_sender", wraps=lib._save_sender) as save:
+            lib.note_radio(a)
+            lib.note_radio(a)
+        self.assertEqual(save.call_count, 1)
+        self.assertTrue(Library(Path(self.tmp.name)).sender(a)["radio_zuletzt"])
 
 
 class XmlTests(unittest.TestCase):
@@ -96,63 +123,70 @@ class XmlTests(unittest.TestCase):
         self.assertEqual(root.findtext("ItemCount"), "1")  # Previous zaehlt nicht
         self.assertEqual(root.findtext(".//StationName"), "A & B <c>")
         self.assertEqual(root.findtext(".//StationUrl"), "http://h/p?a=1&b=2")
+        self.assertIsNone(root.find(".//Bookmark"))
 
     def test_seiten(self):
         self.assertEqual(xmlitems.page(list(range(250)), 101, 200), list(range(100, 200)))
         self.assertEqual(len(xmlitems.page(list(range(250)), 1, 500)), 100)
 
 
-class MenueTests(Base):
-    def test_hauptmenue(self):
-        r = self.call("/setupapp/aldi/asp/BrowseXML/loginXML.asp", "gofile=&mac=h&dlang=ger")
-        n, it = items(r)
-        self.assertEqual([i["Title"] for i in it], ["Favoriten", "Airable-Favoriten", "Podcasts"])
-        self.assertEqual(n, 3)
-        self.assertTrue(it[0]["UrlDir"].endswith("/portal/favoriten?"))
+class SenderlisteTests(Base):
+    MENUE = ("/setupapp/aldi/asp/BrowseXML/loginXML.asp", "gofile=&mac=h&dlang=ger")
+
+    def test_leer(self):
+        n, it = items(self.call(*self.MENUE))
+        self.assertEqual([i["ItemType"] for i in it], ["Display"])
+        self.mk(portal_url="http://raspi:8095")
+        n, it = items(self.call(*self.MENUE))
+        self.assertIn("raspi:8095", it[1]["Display"])
+
+    def test_sender_direkt_oben_dann_podcasts_ohne_airable(self):
+        lib = self.portal.library
+        a = lib.add_sender(name="Alpha", url="http://a.example/live", genre="Rock", land="DE", bitrate="128")
+        b = lib.add_sender(name="Beta", url="http://b.example/live")
+        versteckt = lib.add_sender(name="Versteckt", url="http://c.example/live")
+        lib.zeigen(b)
+        lib.zeigen(a)
+        r = self.call(*self.MENUE)
         self.assertEqual(r.ctype, "text/html; charset=UTF-8")
+        n, it = items(r)
+        self.assertEqual([i["StationName"] for i in it], ["Beta", "Alpha"])
+        self.assertEqual(it[1]["StationUrl"], f"http://aldi.wifiradiofrontier.com/portal/play/{a}")
+        self.assertEqual((it[1]["StationFormat"], it[1]["StationLocation"]), ("Rock", "DE"))
+        self.portal.podcasts.add("http://feed.example/rss", parse_feed(FEED))
+        n, it = items(self.call(*self.MENUE))
+        self.assertEqual([i.get("StationName") or i.get("Title") for i in it], ["Beta", "Alpha", "Podcasts"])
+        self.assertTrue(it[2]["UrlDir"].endswith("/portal/podcasts?"))
+        self.assertEqual(n, 3)
+        self.assertNotIn(versteckt, [i.get("StationId") for i in it])
+        self.assertEqual(self.portal.forwarder.calls, [])
 
-    def test_hauptmenue_auch_ueber_vtuner(self):
-        n, it = items(self.call("/vtuner", "&mac=h"))
-        self.assertEqual(it[0]["Title"], "Favoriten")
+    def test_vtuner_und_altes_menue_zeigen_die_senderliste(self):
+        lib = self.portal.library
+        lib.zeigen(lib.add_sender(name="Alpha", url="http://a.example/live"))
+        for path, q in (("/vtuner", "&mac=h"), ("/portal/favoriten", "&startItems=1&endItems=100")):
+            self.assertEqual(items(self.call(path, q))[1][0]["StationName"], "Alpha", path)
 
-    def test_hauptmenue_ohne_airable(self):
-        self.portal.forwarder = FakeForwarder(error=UpstreamError("aus"))
-        n, it = items(self.call("/vtuner", "&mac=h"))
-        self.assertEqual([i["Title"] for i in it], ["Favoriten"])
-
-    def test_testmenue_nur_wenn_eingeschaltet(self):
-        _, it = items(self.call("/vtuner", ""))
-        self.assertNotIn("Test", [i.get("Title") for i in it])
-        self.assertEqual(self.call("/portal/test").status, 404)
-        self.mk(testmenue=True)
-        _, it = items(self.call("/vtuner", ""))
-        self.assertEqual(it[-1]["Title"], "Test")
-        n, it = items(self.call("/portal/test"))
-        self.assertEqual([i["ItemType"] for i in it][:3], ["Previous", "Display", "Display"])
-        self.assertEqual(sum(1 for i in it if i["ItemType"] == "Station"), 5)
+    def test_blaettern(self):
+        lib = self.portal.library
+        for i in range(130):
+            lib.zeigen(lib.add_sender(name=f"Sender {i}", url=f"http://x/{i}"))
+        self.portal.podcasts.add("http://feed.example/rss", parse_feed(FEED))
+        n, it = items(self.call("/vtuner", "startItems=1&endItems=100"))
+        self.assertEqual((n, len(it)), (131, 100))
+        n, it = items(self.call("/vtuner", "startItems=101&endItems=200"))
+        self.assertEqual(len(it), 31)
+        self.assertEqual(it[0]["StationName"], "Sender 100")
+        self.assertEqual(it[-1]["Title"], "Podcasts")
 
     def test_token(self):
         r = self.call("/setupapp/aldi/asp/BrowseXML/loginXML.asp", "token=0")
         self.assertEqual(len(r.body), 49)
-        self.assertEqual(self.portal.forwarder.calls, [])
 
-    def test_favoriten_leer_und_gefuellt(self):
-        n, it = items(self.call("/portal/favoriten", "&startItems=1&endItems=100&mac=h"))
-        self.assertEqual([i["ItemType"] for i in it], ["Previous", "Display"])
-        self.mk(portal_url="http://raspi:8095")
-        n, it = items(self.call("/portal/favoriten", "&startItems=1&endItems=100&mac=h"))
-        self.assertEqual([i["ItemType"] for i in it], ["Previous", "Display", "Display"])
-        self.assertIn("raspi:8095", it[2]["Display"])
-        lib = self.portal.library
-        for i in range(130):
-            lib.fav_add(lib.add_sender(name=f"Sender {i}", url=f"http://x/{i}"))
-        n, it = items(self.call("/portal/favoriten", "startItems=1&endItems=100"))
-        self.assertEqual(n, 131)  # 130 Sender + Ordner "Favorit-Plaetze"
-        self.assertEqual(len(it), 101)  # 100 Sender + Previous
-        n, it = items(self.call("/portal/favoriten", "startItems=101&endItems=200"))
-        self.assertEqual(len(it), 32)
-        self.assertEqual(it[1]["StationName"], "Sender 100")
-        self.assertEqual(it[-1]["ItemType"], "Dir")
+    def test_alte_routen_gibt_es_nicht_mehr(self):
+        for path in ("/portal/plaetze", "/portal/test", "/portal/umleitung/9000004"):
+            self.assertEqual(self.call(path).status, 404, path)
+        self.assertIsNone(self.call("/vtuner/collection/push/station=1000001"), "geht an Airable")
 
 
 class LookupPlayTests(Base):
@@ -163,29 +197,22 @@ class LookupPlayTests(Base):
                                     bitrate="128", land="DE")
         self.https = lib.add_sender(name="Nur https", url="https://secure.example/live")
 
-    def search(self, sid):
-        return self.call("/setupapp/aldi/asp/BrowseXML/Search.asp", f"sSearchtype=3&Search={sid}&mac=h")
-
-    def test_eigene_id_wird_nachgeschlagen(self):
+    def test_eigene_id_wird_nachgeschlagen_und_gemerkt(self):
         n, it = items(self.search(self.eigen))
         st = it[1]
         self.assertEqual((st["StationId"], st["StationName"]), (self.eigen, "Mein Sender"))
         self.assertEqual(st["StationUrl"], f"http://aldi.wifiradiofrontier.com/portal/play/{self.eigen}")
         self.assertEqual(it[0]["UrlPrevious"], "http://aldi.wifiradiofrontier.com/vtuner?")
+        self.assertTrue(self.portal.library.sender(self.eigen)["radio_zuletzt"])
 
-    def test_unbekannte_airable_id_wird_durchgereicht(self):
+    def test_ausgeblendet_spielt_weiter(self):
+        """FAV-Taste: Ein Sender, der nicht mehr in der Liste steht, wird trotzdem gefunden."""
+        self.assertNotIn(self.eigen, self.portal.library.liste())
+        self.assertEqual(items(self.search(self.eigen))[1][1]["StationName"], "Mein Sender")
+
+    def test_unbekannte_ids_gehen_an_airable(self):
         self.assertIsNone(self.search("1234567890123456"))
-
-    def test_airable_id_mit_ersatz(self):
-        aid = "1234567890123456"
-        self.portal.store.note_seen(aid, name="Alt")
-        self.assertIsNone(self.search(aid))
-        self.portal.store.set_ersatz(aid, self.eigen)
-        st = items(self.search(aid))[1][1]
-        self.assertEqual((st["StationId"], st["StationName"]), (aid, "Mein Sender"))
-        with mock.patch("radioportal.probe.resolve_for_play", side_effect=lambda u, timeout=0: u):
-            r = self.call(f"/portal/play/{aid}")
-        self.assertEqual(r.body, b"http://stream.example/live")
+        self.assertIsNone(self.search("3000001"), "Plaetze gibt es nicht mehr")
 
     def test_play_klartext_ohne_zeilenende(self):
         with mock.patch("radioportal.probe.resolve_for_play",
@@ -203,82 +230,41 @@ class LookupPlayTests(Base):
     def test_unbekannte_play_id(self):
         self.assertEqual(self.call("/portal/play/42").status, 404)
 
-    def test_testsender_und_umleitung(self):
-        self.mk(testmenue=True)
-        r = self.call("/portal/play/9000004")
-        self.assertEqual(r.body, b"http://aldi.wifiradiofrontier.com/portal/umleitung/9000004")
-        r = self.call("/portal/umleitung/9000004")
-        self.assertEqual(r.status, 302)
-        self.assertTrue(dict(r.headers)["Location"].startswith("http://"))
-        self.assertEqual(self.call("/portal/play/9000001").status, 200)
-
     def test_umlaute_im_namen(self):
         sid = self.portal.library.add_sender(name="Süd-Radio Köln", url="http://y/1")
         self.assertEqual(items(self.search(sid))[1][1]["StationName"], "Sued-Radio Koeln")
 
 
+class AufloesenTests(unittest.TestCase):
+    def test_zeitbudget_wird_eingehalten(self):
+        """Das Radio wartet beim Abspielen: nie laenger als das Budget, sonst die gespeicherte Adresse."""
+        def langsam(url, timeout, body_bytes=0):
+            time.sleep(0.3)
+            return 302, {"location": url + "x"}, b"", False
+        with mock.patch("radioportal.probe._fetch", side_effect=langsam):
+            t = time.monotonic()
+            self.assertEqual(probe.resolve_for_play("http://a.example/s", timeout=4.0, budget=1.0),
+                             "http://a.example/s")
+            self.assertLess(time.monotonic() - t, 1.5)
+
+    def test_weiterleitung_wird_aufgeloest(self):
+        antworten = iter([(302, {"location": "http://cdn.example/e.mp3"}, b"", False),
+                          (200, {"content-type": "audio/mpeg"}, b"", False)])
+        with mock.patch("radioportal.probe._fetch", side_effect=lambda *a, **k: next(antworten)):
+            self.assertEqual(probe.resolve_for_play("http://a.example/s"), "http://cdn.example/e.mp3")
+
+
+class BeschreibeTests(unittest.TestCase):
+    def test_ohne_kennung_des_radios(self):
+        self.assertEqual(radio.beschreibe("/setupapp/aldi/asp/BrowseXML/loginXML.asp", "token=0"), ("Anmeldung", ""))
+        self.assertEqual(radio.beschreibe("/setupapp/aldi/asp/BrowseXML/loginXML.asp", "gofile=&mac=geheim"),
+                         ("Senderliste", ""))
+        self.assertEqual(radio.beschreibe("/setupapp/aldi/asp/BrowseXML/Search.asp",
+                                          "sSearchtype=3&Search=1000003&mac=geheim"), ("Sender nachschlagen", "1000003"))
+        self.assertEqual(radio.beschreibe("/portal/live/1000002.mp3", ""), ("Sender über den Server", "1000002"))
+        self.assertEqual(radio.beschreibe("/FindUpdate.aspx", "mac=AABBCC"), ("Update-Prüfung", ""))
+        self.assertNotIn("geheim", str(radio.beschreibe("/vtuner/country=de", "mac=geheim")))
+
+
 if __name__ == "__main__":
     unittest.main()
-
-
-class PlatzTests(Base):
-    """FAV-Taste: Plaetze "Favorit k" spielen immer den k-ten Favoriten der Weboberflaeche."""
-
-    def setUp(self):
-        super().setUp()
-        lib = self.portal.library
-        self.a = lib.add_sender(name="Alpha", url="http://a.example/live")
-        self.b = lib.add_sender(name="Beta", url="http://b.example/live")
-        lib.fav_add(self.a)
-        lib.fav_add(self.b)
-
-    def search(self, sid):
-        return self.call("/setupapp/aldi/asp/BrowseXML/Search.asp", f"sSearchtype=3&Search={sid}&mac=h")
-
-    def test_menue_hat_feste_namen_und_zeigt_inhalt_in_beschreibung(self):
-        n, it = items(self.call("/portal/plaetze"))
-        st = [i for i in it if i["ItemType"] == "Station"]
-        self.assertEqual([s["StationName"] for s in st][:3], ["Favorit 1", "Favorit 2", "Favorit 3"])
-        self.assertEqual(st[0]["StationId"], "3000001")
-        self.assertIn("Alpha", st[0]["StationDesc"])
-        self.assertIn("leer", st[2]["StationDesc"])
-
-    def test_platz_spielt_kten_favoriten_und_folgt_der_reihenfolge(self):
-        self.assertEqual(items(self.search("3000001"))[1][1]["StationName"], "Alpha")
-        self.portal.library.fav_move(self.b, -1)
-        self.assertEqual(items(self.search("3000001"))[1][1]["StationName"], "Beta")
-        self.assertEqual(items(self.search("3000002"))[1][1]["StationName"], "Alpha")
-        self.assertIsNone(self.search("3000003"))  # leer: an Airable durchgereicht, die kennt es nicht
-
-    def test_alte_id_mit_platz_als_ersatz(self):
-        aid = "1234567890123456"
-        self.portal.store.note_seen(aid, name="Alt")
-        self.portal.store.set_ersatz(aid, "3000002")
-        self.assertEqual(items(self.search(aid))[1][1]["StationName"], "Beta")
-        self.portal.library.fav_remove(self.b)
-        self.assertIsNone(self.search(aid))
-
-    def test_bookmark_und_push_pop(self):
-        c = self.portal.library.add_sender(name="Gamma", url="http://c.example/live")
-        st = items(self.search(c))[1][1]
-        self.assertTrue(st["Bookmark"].endswith(f"/vtuner/collection/push/station={c}?"))
-        r = self.call(f"/vtuner/collection/push/station={c}")
-        self.assertEqual(r.status, 200)
-        self.assertIn(c, self.portal.library.favorites())
-        st = items(self.search(c))[1][1]
-        self.assertIn("/collection/pop/", st["Bookmark"])
-        self.call(f"/vtuner/collection/pop/station={c}")
-        self.assertNotIn(c, self.portal.library.favorites())
-
-
-class AusblendenTests(Base):
-    def test_airable_menues_ausblenden(self):
-        self.mk(airable_ausblenden=("help", "country="))
-        menue = (b'<?xml version="1.0"?><ListOfItems><ItemCount>3</ItemCount>'
-                 b'<Item><ItemType>Dir</ItemType><Title>Sender</Title><UrlDir>http://a/vtuner/stations?</UrlDir></Item>'
-                 b'<Item><ItemType>Dir</ItemType><Title>Oertlich</Title><UrlDir>http://a/vtuner/country=de?</UrlDir></Item>'
-                 b'<Item><ItemType>Dir</ItemType><Title>Hilfe</Title><UrlDir>http://a/vtuner/help?</UrlDir></Item>'
-                 b'</ListOfItems>')
-        self.portal.forwarder.body = menue
-        _, it = items(self.call("/vtuner", ""))
-        self.assertEqual([i.get("Title") for i in it], ["Favoriten", "Sender"])

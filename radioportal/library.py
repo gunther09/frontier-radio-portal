@@ -1,12 +1,15 @@
-"""Eigene Sender und Favoriten (`sender.json`, `favoriten.json`).
+"""Eigene Sender und die Senderliste am Radio (`sender.json`, `favoriten.json`).
 
-Eigene IDs sind Ganzzahlen ab 1000001, aufsteigend und werden nie neu vergeben (die
-FAV-Liste und Stationstasten des Radios speichern sie). Airable-IDs haben 16 Stellen, es gibt also keine
-Ueberschneidung."""
+Eigene IDs sind Ganzzahlen ab 1000001, aufsteigend und werden nie neu vergeben: Die FAV-Liste
+des Radios speichert sie. Deshalb gilt: Eine ID spielt immer denselben Sender. Name und Adresse
+lassen sich aendern, Ausblenden nimmt einen Sender nur aus der Liste (auf der FAV-Taste spielt er
+weiter). Loeschen geht nur bei Sendern, die das Radio nie nachgeschlagen hat, denn nur die koennen
+nicht auf einem FAV-Platz liegen (Speichern geht nur, waehrend der Sender spielt)."""
 
 from __future__ import annotations
 
 import copy
+import datetime
 import json
 import logging
 import os
@@ -18,7 +21,7 @@ from .store import jetzt, write_json_atomic
 log = logging.getLogger(__name__)
 
 FIRST_ID = 1000001
-MAX_ITEMS_PER_PAGE = 100
+RADIO_MERKEN_ALLE = 600  # Sekunden: "zuletzt am Radio" nicht bei jedem Aufruf neu schreiben
 
 
 def _read(path: Path, default):
@@ -37,6 +40,13 @@ def _read(path: Path, default):
         return default
 
 
+def _alter(zeit: str) -> float:
+    try:
+        return (datetime.datetime.now().astimezone() - datetime.datetime.fromisoformat(zeit)).total_seconds()
+    except (TypeError, ValueError):
+        return float("inf")
+
+
 class Library:
     def __init__(self, directory: Path):
         self.dir = Path(directory)
@@ -45,8 +55,8 @@ class Library:
         data = _read(self.dir / "sender.json", {})
         self._sender: dict[str, dict] = data.get("sender", {}) if isinstance(data, dict) else {}
         self._next: int = int(data.get("naechste_id", FIRST_ID)) if isinstance(data, dict) else FIRST_ID
-        favs = _read(self.dir / "favoriten.json", [])
-        self._favs: list[str] = [f for f in favs if isinstance(f, str)] if isinstance(favs, list) else []
+        liste = _read(self.dir / "favoriten.json", [])
+        self._liste: list[str] = [f for f in liste if isinstance(f, str)] if isinstance(liste, list) else []
         # IDs nie neu vergeben, auch wenn sender.json fehlt oder alt ist
         for sid in self._sender:
             if sid.isdigit() and int(sid) >= self._next:
@@ -56,8 +66,8 @@ class Library:
     def _save_sender(self) -> None:
         write_json_atomic(self.dir / "sender.json", {"naechste_id": self._next, "sender": self._sender})
 
-    def _save_favs(self) -> None:
-        write_json_atomic(self.dir / "favoriten.json", self._favs)
+    def _save_liste(self) -> None:
+        write_json_atomic(self.dir / "favoriten.json", self._liste)
 
     # --- Sender ---------------------------------------------------------------
     def add_sender(self, *, name: str, url: str, codec: str = "", bitrate="", land: str = "",
@@ -71,10 +81,12 @@ class Library:
                     return sid
             sid = str(self._next)
             self._next += 1
+            # radio_zuletzt "" = vom Radio noch nie nachgeschlagen (Sender aus der Zeit davor haben
+            # das Feld nicht und gelten vorsichtshalber als gespielt)
             self._sender[sid] = {"id": sid, "name": name.strip(), "url": url, "url_orig": url_orig or url,
                                  "codec": codec, "bitrate": str(bitrate or ""), "land": land,
                                  "genre": genre, "quelle": quelle, "rb_uuid": rb_uuid,
-                                 "hinweis": hinweis, "angelegt": jetzt()}
+                                 "hinweis": hinweis, "angelegt": jetzt(), "radio_zuletzt": ""}
             self._save_sender()
             return sid
 
@@ -96,45 +108,66 @@ class Library:
         with self._lock:
             return copy.deepcopy(self._sender)
 
-    def remove_sender(self, sid: str, in_use: set[str]) -> bool:
-        """Entfernt einen Sender, wenn er in keiner Favoritenliste und bei keiner Taste
-        verwendet wird. Die ID bleibt vergeben."""
+    def note_radio(self, sid: str) -> None:
+        """Das Radio hat den Sender nachgeschlagen oder abgespielt."""
         with self._lock:
-            if sid not in self._sender or sid in self._favs or sid in in_use:
+            s = self._sender.get(sid)
+            if s is None or _alter(s.get("radio_zuletzt") or "") < RADIO_MERKEN_ALLE:
+                return
+            s["radio_zuletzt"] = jetzt()
+            try:
+                self._save_sender()
+            except OSError:
+                log.exception("sender.json nicht geschrieben")
+
+    def loeschbar(self, sid: str) -> bool:
+        with self._lock:
+            s = self._sender.get(sid)
+            return s is not None and sid not in self._liste and s.get("radio_zuletzt") == ""
+
+    def remove_sender(self, sid: str) -> bool:
+        """Nur ausgeblendete Sender, die das Radio nie nachgeschlagen hat. Die ID bleibt vergeben."""
+        with self._lock:
+            s = self._sender.get(sid)
+            if s is None or sid in self._liste or s.get("radio_zuletzt") != "":
                 return False
             del self._sender[sid]
             self._save_sender()
             return True
 
-    # --- Favoriten ------------------------------------------------------------
-    def favorites(self) -> list[str]:
+    # --- Senderliste am Radio -------------------------------------------------
+    def liste(self) -> list[str]:
         with self._lock:
-            return list(self._favs)
+            return [sid for sid in self._liste if sid in self._sender]
 
-    def fav_add(self, sid: str) -> bool:
+    def ausgeblendet(self) -> list[str]:
         with self._lock:
-            if sid not in self._sender or sid in self._favs:
+            return sorted((sid for sid in self._sender if sid not in self._liste), key=int)
+
+    def zeigen(self, sid: str) -> bool:
+        with self._lock:
+            if sid not in self._sender or sid in self._liste:
                 return False
-            self._favs.append(sid)
-            self._save_favs()
+            self._liste.append(sid)
+            self._save_liste()
             return True
 
-    def fav_remove(self, sid: str) -> bool:
+    def ausblenden(self, sid: str) -> bool:
         with self._lock:
-            if sid not in self._favs:
+            if sid not in self._liste:
                 return False
-            self._favs.remove(sid)
-            self._save_favs()
+            self._liste.remove(sid)
+            self._save_liste()
             return True
 
-    def fav_move(self, sid: str, delta: int) -> bool:
+    def verschieben(self, sid: str, delta: int) -> bool:
         with self._lock:
-            if sid not in self._favs:
+            if sid not in self._liste:
                 return False
-            i = self._favs.index(sid)
+            i = self._liste.index(sid)
             j = i + delta
-            if not 0 <= j < len(self._favs):
+            if not 0 <= j < len(self._liste):
                 return False
-            self._favs[i], self._favs[j] = self._favs[j], self._favs[i]
-            self._save_favs()
+            self._liste[i], self._liste[j] = self._liste[j], self._liste[i]
+            self._save_liste()
             return True
