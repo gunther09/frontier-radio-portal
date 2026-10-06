@@ -6,6 +6,8 @@ import urllib.parse
 from pathlib import Path
 
 from radioportal import config, web
+from radioportal import radio as radio_mod
+from radioportal.__main__ import nachtragen
 from radioportal.probe import Result
 from radioportal.radiobrowser import RadioBrowser
 from radioportal.server import Portal
@@ -31,7 +33,7 @@ def fake_probe(url):
         return Result(ok=False, hinweis="Nicht erreichbar oder kein Audiostrom (Antwort 404).")
     https = url.startswith("https://")
     return Result(ok=True, url=url, start=url, codec="MP3", bitrate="128", https_nur=https,
-                  spielbar=not https, hinweis="geprueft")
+                  spielbar=not https, hinweis="geprueft", text="Guter Rock." if "rock" in url else "")
 
 
 class WebBase(unittest.TestCase):
@@ -211,6 +213,31 @@ class ActionTests(WebBase):
         self.assertEqual(lib.liste(), [sid])
         res = self.post("/sender/bearbeiten", id=sid, name="", url="http://neu.example/rock")
         self.assertIn("nicht leer", self.text(res))
+
+    def test_beschreibung_aus_stream_und_tags(self):
+        lib = self.portal.library
+        self.post("/sender/hinzufuegen", uuid="u1")
+        self.post("/sender/hinzufuegen", uuid="u2")
+        rock, jazz = lib.liste()
+        self.assertEqual((lib.sender(rock)["stream_text"], lib.sender(rock)["tags"]), ("Guter Rock.", "rock, pop"))
+        self.assertEqual(radio_mod.beschreibung(lib.sender(jazz)), "jazz")
+        self.post("/sender/bearbeiten", id=jazz, name="Jazz Radio", url="https://jazz.example/live",
+                  beschreibung="  Nur Jazz  ")
+        self.assertEqual(radio_mod.beschreibung(lib.sender(jazz)), "Nur Jazz")
+        self.assertIn('value="Nur Jazz"', self.text(self.get("/sender/bearbeiten", f"id={jazz}")))
+
+    def test_nachtragen_fuer_alte_sender(self):
+        lib = self.portal.library
+        alt = lib.add_sender(name="Alt", url="http://rock.example/live", rb_uuid="u1")
+        weg = lib.add_sender(name="Weg", url="http://kaputt.example/")
+        for sid in (alt, weg):  # wie aus Version 0.3.0: Felder fehlen ganz
+            with lib._lock:
+                for k in ("stream_text", "stream_genre", "tags"):
+                    lib._sender[sid].pop(k)
+        self.assertEqual(nachtragen(self.portal), 2)
+        self.assertEqual((lib.sender(alt)["stream_text"], lib.sender(alt)["tags"]), ("Guter Rock.", "rock, pop"))
+        self.assertEqual(lib.sender(weg)["stream_text"], "")
+        self.assertEqual(nachtragen(self.portal), 0)
 
     def test_pruefen(self):
         self.post("/sender/hinzufuegen", uuid="u1")

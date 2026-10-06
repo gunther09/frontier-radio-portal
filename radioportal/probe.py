@@ -29,7 +29,9 @@ class Result:
     codec: str = ""             # MP3, AAC, HLS, OGG, ...
     bitrate: str = ""
     name: str = ""
-    https_nur: bool = False     # nur ueber https erreichbar
+    text: str = ""              # icy-description, wenn sie mehr sagt als der Name
+    genre: str = ""             # icy-genre ("various" u. ae. weggelassen)
+    https_nur: bool = False    # nur ueber https erreichbar
     spielbar: bool = False      # das Radio kann es direkt spielen (MP3 ueber http)
     hinweis: str = ""           # Text fuer die Oberflaeche
     log: list = field(default_factory=list)
@@ -53,6 +55,31 @@ def codec_aus_typ(content_type: str, url: str = "") -> str:
     if ct in ("audio/x-mpegurl",) or u.endswith(".m3u"):
         return "M3U"
     return ""
+
+
+_LEER = {"", "unspecified description", "no description", "unspecified", "various", "misc", "other", "default",
+         "no name", "description", "genre", "n/a", "-"}
+
+
+def _header_text(v: str) -> str:
+    """Header kommen als latin-1; viele Server schicken aber UTF-8."""
+    try:
+        v = v.encode("latin-1").decode("utf-8")
+    except UnicodeError:
+        pass
+    return " ".join(v.split())[:160]
+
+
+def stream_angaben(headers: dict) -> tuple[str, str]:
+    """(Beschreibung, Genre) aus den icy-Headern; Platzhalter und die Wiederholung des Namens fallen weg."""
+    name = _header_text(headers.get("icy-name", "")).lower()
+    text = _header_text(headers.get("icy-description", ""))
+    genre = _header_text(headers.get("icy-genre", ""))
+    if text.lower() in _LEER or text.lower() == name:
+        text = ""
+    if genre.lower() in _LEER:
+        genre = ""
+    return text, genre[:40]
 
 
 def _mp3_sync(data: bytes) -> bool:
@@ -187,6 +214,7 @@ def probe(url: str, timeout: float = TIMEOUT) -> Result:
         r.ok, r.url, r.start, r.codec = True, final, cand, codec
         r.bitrate = headers.get("icy-br", "").split(",")[0].strip()
         r.name = headers.get("icy-name", "")
+        r.text, r.genre = stream_angaben(headers)
         r.https_nur = https
         r.spielbar = codec == "MP3" and not https
         if r.spielbar:

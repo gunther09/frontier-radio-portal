@@ -69,7 +69,11 @@ class RadioBrowser:
     def _clean(st: dict) -> dict:
         out = {k: st.get(k, "") for k in FIELDS}
         out["url"] = st.get("url_resolved") or st.get("url") or ""
-        out["tags"] = ", ".join(t for t in str(st.get("tags") or "").split(",") if t)[:80]
+        tags = []
+        for t in (t.strip() for t in str(st.get("tags") or "").split(",")):
+            if t and len(", ".join(tags + [t])) <= 80:
+                tags.append(t)
+        out["tags"] = ", ".join(tags)
         return out
 
     def _search_raw(self, name: str, mp3_only: bool, limit: int) -> list:

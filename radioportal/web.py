@@ -297,7 +297,8 @@ def seite_adresse(portal, qs, name="", url="", ergebnis=None, fehler="") -> Resu
             inhalt += (f'<p>Format: <b>{esc(r.codec)}</b>{" · " + esc(r.bitrate) + " kbit/s" if r.bitrate else ""}'
                        f'<br><span class="klein mute">{esc(r.start)}</span></p>'
                        + knopf("/sender/adresse/speichern", "Zur Liste hinzufügen", "pri", name=name or r.name or url,
-                               start=r.start, orig=url, codec=r.codec, bitrate=r.bitrate, hinweis=r.hinweis))
+                               start=r.start, orig=url, codec=r.codec, bitrate=r.bitrate, hinweis=r.hinweis,
+                               stext=r.text, sgenre=r.genre))
     inhalt += '<p><a href="/">Zurück zur Liste</a></p>'
     return page("Sender per Adresse", inhalt, "/", qs.get("m", [""])[0])
 
@@ -400,7 +401,8 @@ def _uebernehmen(portal, uuid: str) -> tuple[str | None, str]:
     genre = (st["tags"].split(",")[0] or "").strip()
     sid = portal.library.add_sender(
         name=st["name"], url=r.start, codec=r.codec, bitrate=st["bitrate"] or r.bitrate, land=st["countrycode"],
-        genre=genre, quelle="radio-browser", rb_uuid=uuid, url_orig=st["url"], hinweis=r.hinweis)
+        genre=genre, quelle="radio-browser", rb_uuid=uuid, url_orig=st["url"], hinweis=r.hinweis,
+        tags=st["tags"], stream_text=r.text, stream_genre=r.genre)
     threading.Thread(target=portal.rb.count_click, args=(uuid,), daemon=True).start()
     return sid, r.hinweis
 
@@ -440,7 +442,8 @@ def aktion(portal, path: str, form: dict) -> Result:
         if not name or not start:
             return redirect("/", "Name oder Adresse fehlt.")
         sid = lib.add_sender(name=name, url=start, codec=f("codec"), bitrate=f("bitrate"), quelle="manuell",
-                             url_orig=f("orig") or start, hinweis=f("hinweis"))
+                             url_orig=f("orig") or start, hinweis=f("hinweis"), stream_text=f("stext")[:160],
+                             stream_genre=f("sgenre")[:40])
         return _in_die_liste(portal, sid)
     if path == "/sender/bearbeiten":
         sid, name, url, text = f("id"), f("name"), f("url"), f("beschreibung")[:120]
@@ -457,7 +460,7 @@ def aktion(portal, path: str, form: dict) -> Result:
                 return seite_bearbeiten(portal, {}, sid, name, url, fehler=f"Nicht gespeichert: {r.hinweis}",
                                         text=text)
             felder.update(url=r.start, url_orig=url, codec=r.codec, bitrate=r.bitrate or s.get("bitrate", ""),
-                          hinweis=r.hinweis)
+                          hinweis=r.hinweis, stream_text=r.text, stream_genre=r.genre)
             zusatz = f" Neue Adresse: {r.hinweis}"
         lib.update_sender(sid, **felder)
         return redirect("/", f"„{name}“ gespeichert.{zusatz}")
@@ -467,7 +470,8 @@ def aktion(portal, path: str, form: dict) -> Result:
             return redirect("/", "Unbekannter Sender.")
         r = portal.prober(s.get("url_orig") or s["url"])
         if r.ok:
-            lib.update_sender(s["id"], url=r.start, codec=r.codec, hinweis=r.hinweis)
+            lib.update_sender(s["id"], url=r.start, codec=r.codec, hinweis=r.hinweis, stream_text=r.text,
+                              stream_genre=r.genre)
         return redirect(f"/sender/bearbeiten?id={s['id']}", f"Prüfung: {r.hinweis}")
 
     if path == "/podcasts/neu":

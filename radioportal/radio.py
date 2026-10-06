@@ -39,12 +39,23 @@ def _range(qs: dict) -> tuple[int, int]:
     return num("startItems", 1), num("endItems", 100)
 
 
+def _schlagwoerter(tags: str, n: int = 5) -> str:
+    out = []
+    for t in (tags or "").split(","):
+        t = t.strip()
+        if t and t.lower() not in (o.lower() for o in out):
+            out.append(t)
+    return ", ".join(out[:n])
+
+
 def beschreibung(s: dict) -> str:
-    """Text hinter "Beschreibung:" im Display: die eigene, sonst Genre, Land und Format."""
-    if (s.get("beschreibung") or "").strip():
-        return s["beschreibung"].strip()
-    fmt = " ".join(x for x in (s.get("codec") or "", f"{s['bitrate']} kbit/s" if s.get("bitrate") else "") if x)
-    return ", ".join(x for x in (s.get("genre") or "", s.get("land") or "", fmt) if x)
+    """Text hinter "Beschreibung:" im Display: die eigene, sonst was der Stream ueber sich sagt,
+    sonst die Schlagwoerter von radio-browser, sonst das Genre."""
+    for text in (s.get("beschreibung"), s.get("stream_text"), _schlagwoerter(s.get("tags", "")),
+                 s.get("genre"), s.get("stream_genre")):
+        if (text or "").strip():
+            return text.strip()
+    return ""
 
 
 def _station(portal, host: str, sid: str, s: dict) -> str:

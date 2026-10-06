@@ -72,7 +72,7 @@ class Library:
     # --- Sender ---------------------------------------------------------------
     def add_sender(self, *, name: str, url: str, codec: str = "", bitrate="", land: str = "",
                    genre: str = "", quelle: str = "manuell", rb_uuid: str = "", url_orig: str = "",
-                   hinweis: str = "") -> str:
+                   hinweis: str = "", tags: str = "", stream_text: str = "", stream_genre: str = "") -> str:
         """Legt einen Sender an und gibt seine ID zurueck. Gleicher radio-browser-Sender oder
         gleiche Adresse: der vorhandene wird zurueckgegeben."""
         with self._lock:
@@ -86,7 +86,8 @@ class Library:
             self._sender[sid] = {"id": sid, "name": name.strip(), "url": url, "url_orig": url_orig or url,
                                  "codec": codec, "bitrate": str(bitrate or ""), "land": land,
                                  "genre": genre, "quelle": quelle, "rb_uuid": rb_uuid,
-                                 "hinweis": hinweis, "angelegt": jetzt(), "radio_zuletzt": ""}
+                                 "hinweis": hinweis, "tags": tags, "stream_text": stream_text,
+                                 "stream_genre": stream_genre, "angelegt": jetzt(), "radio_zuletzt": ""}
             self._save_sender()
             return sid
 

@@ -153,8 +153,15 @@ class SenderlisteTests(Base):
         self.assertEqual([i["StationName"] for i in it], ["Beta", "Alpha"])
         self.assertEqual(it[1]["StationUrl"], f"http://aldi.wifiradiofrontier.com/portal/play/{a}")
         self.assertEqual((it[1]["StationFormat"], it[1]["StationLocation"]), ("Rock", "DE"))
-        self.assertEqual(it[1]["StationDesc"], "Rock, DE, 128 kbit/s")
+        self.assertEqual(it[1]["StationDesc"], "Rock")
         self.assertEqual(it[0]["StationDesc"], "")
+        lib.update_sender(a, tags="rock, Rock, classic rock")
+        lib.update_sender(b, stream_genre="Jazz")
+        n, it = items(self.call(*self.MENUE))
+        self.assertEqual((it[1]["StationDesc"], it[0]["StationDesc"]), ("rock, classic rock", "Jazz"))
+        lib.update_sender(a, stream_text="Alles von Relevanz.")
+        n, it = items(self.call(*self.MENUE))
+        self.assertEqual(it[1]["StationDesc"], "Alles von Relevanz.")
         lib.update_sender(a, beschreibung="Mein Lieblingssender")
         n, it = items(self.call(*self.MENUE))
         self.assertEqual(it[1]["StationDesc"], "Mein Lieblingssender")
@@ -269,6 +276,17 @@ class BeschreibeTests(unittest.TestCase):
         self.assertEqual(radio.beschreibe("/portal/live/1000002.mp3", ""), ("Sender über den Server", "1000002"))
         self.assertEqual(radio.beschreibe("/FindUpdate.aspx", "mac=AABBCC"), ("Update-Prüfung", ""))
         self.assertNotIn("geheim", str(radio.beschreibe("/vtuner/country=de", "mac=geheim")))
+
+
+class StreamAngabenTests(unittest.TestCase):
+    def test_platzhalter_und_name_fallen_weg(self):
+        sa = probe.stream_angaben
+        self.assertEqual(sa({"icy-name": "Nova", "icy-description": "Es ist kompliziert.", "icy-genre": "Talk"}),
+                         ("Es ist kompliziert.", "Talk"))
+        self.assertEqual(sa({"icy-name": "ROCK ANTENNE Bayern", "icy-description": "ROCK ANTENNE  Bayern"}), ("", ""))
+        self.assertEqual(sa({"icy-name": "no name", "icy-description": "Unspecified description",
+                             "icy-genre": "various"}), ("", ""))
+        self.assertEqual(sa({"icy-description": "GrÃ¼Ãe"}), ("Grüße", ""))
 
 
 if __name__ == "__main__":
