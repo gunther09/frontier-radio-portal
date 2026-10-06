@@ -15,6 +15,7 @@ import urllib.parse
 
 from . import __version__
 from . import podcasts as pod
+from . import radio as radio_mod
 from .radiobrowser import RadioBrowserError
 
 log = logging.getLogger(__name__)
@@ -301,16 +302,20 @@ def seite_adresse(portal, qs, name="", url="", ergebnis=None, fehler="") -> Resu
     return page("Sender per Adresse", inhalt, "/", qs.get("m", [""])[0])
 
 
-def seite_bearbeiten(portal, qs, sid: str = "", name=None, url=None, fehler="") -> Result:
+def seite_bearbeiten(portal, qs, sid: str = "", name=None, url=None, fehler="", text=None) -> Result:
     sid = sid or qs.get("id", [""])[0]
     s = portal.library.sender(sid)
     if not s:
         return redirect("/", "Unbekannter Sender.")
     name = s["name"] if name is None else name
     url = (s.get("url_orig") or s["url"]) if url is None else url
+    text = s.get("beschreibung", "") if text is None else text
+    auto = radio_mod.beschreibung({**s, "beschreibung": ""})
     form = (f'<form method="post" action="/sender/bearbeiten"><input type="hidden" name="id" value="{esc(sid)}">'
             f'<div class="row"><label>Name</label><input type="text" name="name" class="grow" value="{esc(name)}" required></div>'
             f'<div class="row"><label>Adresse</label><input type="url" name="url" class="grow" value="{esc(url)}" required></div>'
+            f'<div class="row"><label>Beschreibung</label><input type="text" name="beschreibung" class="grow" maxlength="120" '
+            f'value="{esc(text)}" placeholder="{esc(auto or "leer lassen: keine angegeben")}"></div>'
             f'<div class="row"><label></label><button class="pri">Speichern</button></div></form>')
     fehl = f'<p class="bad">{esc(fehler)}</p>' if fehler else ""
     gespielt = s["url"] if s["url"] != url else ""
@@ -438,17 +443,19 @@ def aktion(portal, path: str, form: dict) -> Result:
                              url_orig=f("orig") or start, hinweis=f("hinweis"))
         return _in_die_liste(portal, sid)
     if path == "/sender/bearbeiten":
-        sid, name, url = f("id"), f("name"), f("url")
+        sid, name, url, text = f("id"), f("name"), f("url"), f("beschreibung")[:120]
         s = lib.sender(sid)
         if not s:
             return redirect("/", "Unbekannter Sender.")
         if not name or not url:
-            return seite_bearbeiten(portal, {}, sid, name, url, fehler="Name und Adresse dürfen nicht leer sein.")
-        felder, zusatz = {"name": name}, ""
+            return seite_bearbeiten(portal, {}, sid, name, url, fehler="Name und Adresse dürfen nicht leer sein.",
+                                    text=text)
+        felder, zusatz = {"name": name, "beschreibung": text}, ""
         if url != (s.get("url_orig") or s["url"]):
             r = portal.prober(url)
             if not r.ok:
-                return seite_bearbeiten(portal, {}, sid, name, url, fehler=f"Nicht gespeichert: {r.hinweis}")
+                return seite_bearbeiten(portal, {}, sid, name, url, fehler=f"Nicht gespeichert: {r.hinweis}",
+                                        text=text)
             felder.update(url=r.start, url_orig=url, codec=r.codec, bitrate=r.bitrate or s.get("bitrate", ""),
                           hinweis=r.hinweis)
             zusatz = f" Neue Adresse: {r.hinweis}"

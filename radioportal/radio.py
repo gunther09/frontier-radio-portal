@@ -39,9 +39,17 @@ def _range(qs: dict) -> tuple[int, int]:
     return num("startItems", 1), num("endItems", 100)
 
 
+def beschreibung(s: dict) -> str:
+    """Text hinter "Beschreibung:" im Display: die eigene, sonst Genre, Land und Format."""
+    if (s.get("beschreibung") or "").strip():
+        return s["beschreibung"].strip()
+    fmt = " ".join(x for x in (s.get("codec") or "", f"{s['bitrate']} kbit/s" if s.get("bitrate") else "") if x)
+    return ", ".join(x for x in (s.get("genre") or "", s.get("land") or "", fmt) if x)
+
+
 def _station(portal, host: str, sid: str, s: dict) -> str:
-    return portal.xml.station(sid, s["name"], f"http://{host}/portal/play/{sid}", fmt=s.get("genre", ""),
-                              location=s.get("land", ""), bandwidth=s.get("bitrate", ""))
+    return portal.xml.station(sid, s["name"], f"http://{host}/portal/play/{sid}", desc=beschreibung(s),
+                              fmt=s.get("genre", ""), location=s.get("land", ""), bandwidth=s.get("bitrate", ""))
 
 
 def play_target(portal, host: str, s: dict) -> str:
