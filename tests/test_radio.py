@@ -79,6 +79,22 @@ class LibraryTests(Base):
         self.assertEqual((lib.liste(), lib.ausgeblendet()), ([a, b], [c]))
         self.assertEqual(Library(Path(self.tmp.name)).liste(), [a, b])
 
+    def test_platz_setzen(self):
+        lib = self.portal.library
+        a, b, c, d = (lib.add_sender(name=n, url=f"http://x/{n}") for n in "abcd")
+        for s in (a, b, c, d):
+            lib.zeigen(s)
+        self.assertTrue(lib.platz_setzen(c, 1))
+        self.assertEqual(lib.liste(), [c, a, b, d])
+        self.assertTrue(lib.platz_setzen(c, 3))
+        self.assertEqual(lib.liste(), [a, b, c, d])
+        self.assertTrue(lib.platz_setzen(a, 99))
+        self.assertEqual(lib.liste(), [b, c, d, a])
+        self.assertFalse(lib.platz_setzen(b, 1), "steht schon da")
+        lib.ausblenden(d)
+        self.assertFalse(lib.platz_setzen(d, 1))
+        self.assertEqual(Library(Path(self.tmp.name)).liste(), [b, c, a])
+
     def test_loeschen_nur_wenn_ausgeblendet_und_nie_am_radio(self):
         lib = self.portal.library
         a, b = (lib.add_sender(name=n, url=f"http://x/{n}") for n in "ab")

@@ -157,16 +157,22 @@ def radio_status(portal) -> str:
 # ---------------------------------------------------------------------------------------------------
 def _liste_tabelle(portal) -> str:
     lib = portal.library
+    liste = lib.liste()
     zeilen = []
-    for i, sid in enumerate(lib.liste()):
+    for i, sid in enumerate(liste):
         s = lib.sender(sid)
         if not s:
             continue
         info = f"Nr. {esc(sid)}" + (f" · {esc(s['genre'])}" if s.get("genre") else "")
+        plaetze = "".join(f'<option value="{n}"{" selected" if n == i + 1 else ""}>{n}</option>'
+                          for n in range(1, len(liste) + 1))
+        platz = (f'<form method="post" action="/sender/platz"><input type="hidden" name="id" value="{esc(sid)}">'
+                 f'<select name="platz" title="Auf Platz setzen" onchange="this.form.submit()">{plaetze}</select>'
+                 f'<noscript> <button>Setzen</button></noscript></form>')
         zeilen.append(
             f'<tr><td class="mute">{i + 1}</td><td><b>{esc(s["name"])}</b><div class="klein mute">{info}</div></td>'
             f'<td class="hide-m">{fmt_codec(s)}</td><td>{status_badge(s)}</td><td class="hide-m">{am_radio(s)}</td>'
-            f'<td class="r">{knopf("/sender/hoch", "↑", id=sid)} {knopf("/sender/runter", "↓", id=sid)} '
+            f'<td class="r">{knopf("/sender/hoch", "↑", id=sid)} {knopf("/sender/runter", "↓", id=sid)} {platz} '
             f'<a href="/sender/bearbeiten?id={esc(sid)}">Bearbeiten</a> '
             f'{knopf("/sender/ausblenden", "Ausblenden", id=sid)}</td></tr>')
     if not zeilen:
@@ -426,6 +432,13 @@ def aktion(portal, path: str, form: dict) -> Result:
         sid = f("id")
         {"/sender/hoch": lambda: lib.verschieben(sid, -1), "/sender/runter": lambda: lib.verschieben(sid, 1),
          "/sender/ausblenden": lambda: lib.ausblenden(sid), "/sender/einblenden": lambda: lib.zeigen(sid)}[path]()
+        return redirect("/")
+    if path == "/sender/platz":
+        s = lib.sender(f("id"))
+        if not s or not f("platz").isdigit():
+            return redirect("/", "Unbekannter Sender.")
+        if lib.platz_setzen(s["id"], int(f("platz"))):
+            return redirect("/", f"„{s['name']}“ steht jetzt auf Platz {lib.liste().index(s['id']) + 1}.")
         return redirect("/")
     if path == "/sender/loeschen":
         s = lib.sender(f("id"))

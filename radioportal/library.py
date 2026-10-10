@@ -172,3 +172,20 @@ class Library:
             self._liste[i], self._liste[j] = self._liste[j], self._liste[i]
             self._save_liste()
             return True
+
+    def platz_setzen(self, sid: str, platz: int) -> bool:
+        """Sender auf Platz `platz` (1 = oben) der Liste setzen, die anderen ruecken nach."""
+        with self._lock:
+            if sid not in self._liste:
+                return False
+            andere = [s for s in self._liste if s in self._sender and s != sid]
+            platz = max(1, min(platz, len(andere) + 1))
+            if [s for s in self._liste if s in self._sender].index(sid) == platz - 1:
+                return False
+            self._liste.remove(sid)
+            if platz <= len(andere):
+                self._liste.insert(self._liste.index(andere[platz - 1]), sid)
+            else:
+                self._liste.append(sid)
+            self._save_liste()
+            return True
